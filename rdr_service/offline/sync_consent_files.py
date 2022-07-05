@@ -89,11 +89,11 @@ class FileSyncHandler:
         return self.files_to_sync
 
     def _download_file_for_zip(self, file: ConsentFile, org_name, site_name):
-        if config.GAE_PROJECT == 'localhost' and not os.environ.get('UNITTEST_FLAG', None):
-            raise Exception(
-                'Can not download consent files to machines outside the cloud, '
-                'please sync consent files using the cloud environment'
-            )
+        # if config.GAE_PROJECT == 'localhost' and not os.environ.get('UNITTEST_FLAG', None):
+        #     raise Exception(
+        #         'Can not download consent files to machines outside the cloud, '
+        #         'please sync consent files using the cloud environment'
+        #     )
 
         file_name = os.path.basename(file.file_path)
         temp_file_destination = (
@@ -261,11 +261,14 @@ class ConsentSyncGuesser:
 
 
 class ConsentSyncController:
-    def __init__(self, consent_dao, participant_dao: ParticipantDao, storage_provider: GoogleCloudStorageProvider):
+    def __init__(self, consent_dao, participant_dao: ParticipantDao, storage_provider: GoogleCloudStorageProvider, server_config, session, project):
         self.consent_dao = consent_dao
         self.participant_dao = participant_dao
         self.storage_provider = storage_provider
-        self._destination_folder = config.getSettingJson('consent_destination_prefix', default='Participant')
+        self._destination_folder = server_config.get('consent_destination_prefix', 'Participant')
+        self._server_config = server_config
+        self._session = session
+        self._project = project
 
     def _build_sync_handler(self, zip_files: bool, bucket: str, pairing_info: Dict[int, ParticipantPairingInfo]):
         return FileSyncHandler(
@@ -279,13 +282,14 @@ class ConsentSyncController:
     def sync_ready_files(self):
         """Syncs any validated consent files that are ready for syncing"""
 
-        sync_config = config.getSettingJson(config.CONSENT_SYNC_BUCKETS)
+        sync_config = self._server_config.get(config.CONSENT_SYNC_BUCKETS)
         hpos_sync_config = sync_config['hpos']
         orgs_sync_config = sync_config['orgs']
 
         file_list: List[ConsentFile] = self.consent_dao.get_files_ready_to_sync(
             hpo_names=hpos_sync_config.keys(),
-            org_names=orgs_sync_config.keys()
+            org_names=orgs_sync_config.keys(),
+            session=self._session
         )
 
         pairing_info_map = self._build_participant_pairing_map(file_list)
@@ -322,18 +326,17 @@ class ConsentSyncController:
             if file_group:  # Ignore participants paired to an org or hpo we aren't syncing files for
                 file_group.files_to_sync.append(file)
 
-        with self.consent_dao.session() as session:
-            for file_group in [*org_sync_groups.values(), *hpo_sync_groups.values()]:
-                files_synced = file_group.sync_files()
+        for file_group in [*org_sync_groups.values(), *hpo_sync_groups.values()]:
+            files_synced = file_group.sync_files()
 
-                # Update the database after each group syncs so ones
-                # that have succeeded so far get saved if a later one fails
-                if len(files_synced):
-                    self.consent_dao.batch_update_consent_files(session=session, consent_files=files_synced)
-                    session.commit()
+            # Update the database after each group syncs so ones
+            # that have succeeded so far get saved if a later one fails
+            if len(files_synced):
+                self.consent_dao.batch_update_consent_files(session=self._session, consent_files=files_synced)
+                self._session.commit()
 
-                    # Queue tasks to rebuild consent metrics resource data records (for PDR)
-                    dispatch_rebuild_consent_metrics_tasks([file.id for file in files_synced])
+                # Queue tasks to rebuild consent metrics resource data records (for PDR)
+                dispatch_rebuild_consent_metrics_tasks([file.id for file in files_synced], project_id=self._project)
 
     def _build_participant_pairing_map(self, files: List[ConsentFile]) -> Dict[int, ParticipantPairingInfo]:
         """
@@ -341,7 +344,7 @@ class ConsentSyncController:
         and the google group name for their site
         """
         participant_ids = {file.participant_id for file in files}
-        participant_pairing_data = self.participant_dao.get_pairing_data_for_ids(participant_ids)
+        participant_pairing_data = self.participant_dao.get_pairing_data_for_ids(participant_ids, session=self._session)
         return {
             participant_id: ParticipantPairingInfo(hpo_name=hpo_name, org_name=org_name, site_name=site_name)
             for participant_id, hpo_name, org_name, site_name in participant_pairing_data
