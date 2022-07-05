@@ -70,6 +70,26 @@ class ConsentTool(ToolBase):
             self.retro_validate()
         elif self.args.command == 'files-for-update':
             self.files_for_update()
+        elif self.args.command == 'sync':
+            self.sync_consents()
+
+    def sync_consents(self):
+
+        from rdr_service.dao.participant_dao import ParticipantDao
+        from rdr_service.offline.sync_consent_files import ConsentSyncController
+
+        server_config = self.get_server_config()
+
+        with self.get_session() as session:
+            controller = ConsentSyncController(
+                consent_dao=ConsentDao(),
+                participant_dao=ParticipantDao(),
+                storage_provider=GoogleCloudStorageProvider(),
+                server_config=server_config,
+                session=session,
+                project=self.gcp_env.project
+            )
+            controller.sync_ready_files()
 
     def _call_server_for_retro_validation(self, participant_ids):
         if len(participant_ids) > 0:
@@ -356,6 +376,7 @@ def add_additional_arguments(parser: argparse.ArgumentParser):
     subparsers.add_parser('check-retro-sync')
     subparsers.add_parser('retro-validation')
     subparsers.add_parser('files-for-update')
+    subparsers.add_parser('sync')
 
 
 def run():
