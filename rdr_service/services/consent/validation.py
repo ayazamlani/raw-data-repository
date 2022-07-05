@@ -315,6 +315,7 @@ class ConsentValidationController:
 
         self.va_hpo_id = 15  # hpo_dao.get_by_name('VA').hpoId
         self._session = session
+        print(hpo_dao)
 
     @classmethod
     def build_controller(cls, session):

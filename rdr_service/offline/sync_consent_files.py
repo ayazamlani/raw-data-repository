@@ -261,7 +261,8 @@ class ConsentSyncGuesser:
 
 
 class ConsentSyncController:
-    def __init__(self, consent_dao, participant_dao: ParticipantDao, storage_provider: GoogleCloudStorageProvider, server_config, session, project):
+    def __init__(self, consent_dao, participant_dao: ParticipantDao, storage_provider: GoogleCloudStorageProvider,
+                 server_config, session, project):
         self.consent_dao = consent_dao
         self.participant_dao = participant_dao
         self.storage_provider = storage_provider
