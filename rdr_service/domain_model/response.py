@@ -35,11 +35,12 @@ class ParticipantResponses:
 
 @dataclass
 class Response:
-    id: int
     survey_code: str
+    created_datetime: datetime
     authored_datetime: datetime
     status: QuestionnaireResponseStatus
     answered_codes: Dict[str, List['Answer']] = field(default_factory=lambda: defaultdict(list))
+    id: int = None
 
     def has_answer_for(self, question_code_str):
         return (
@@ -84,10 +85,10 @@ class DataType(Enum):
 
 @dataclass
 class Answer:
-    id: int
     value: str
     data_type: DataType
     is_valid: bool = True
+    id: int = None
 
     @classmethod
     def from_db_model(cls, db_answer: QuestionnaireResponseAnswer):

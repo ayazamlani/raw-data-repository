@@ -95,6 +95,7 @@ from rdr_service.model.log_position import LogPosition
 from rdr_service.dao.questionnaire_dao import QuestionnaireHistoryDao, QuestionnaireQuestionDao
 from rdr_service.field_mappings import FieldType, QUESTIONNAIRE_MODULE_CODE_TO_FIELD, QUESTION_CODE_TO_FIELD, \
     QUESTIONNAIRE_ON_DIGITAL_HEALTH_SHARING_FIELD
+from rdr_service.logic.response.ehr_response_processor import EhrResponseProcessor
 from rdr_service.model.code import Code, CodeType
 from rdr_service.model.consent_response import ConsentResponse, ConsentType
 from rdr_service.model.participant import Participant
@@ -618,7 +619,7 @@ class QuestionnaireResponseDao(BaseDao):
                             raise BadRequest(f'unknown measurement unit {answer_code_value} for participant '
                                              f'{participant_id}')
                     elif question_code.value in ['self_reported_height_ft', 'self_reported_height_in',
-                                                 'self_reported_height_cm'] and answer.valueInteger:
+                                                 'self_reported_height_cm'] and answer.valueInteger:  # TODO: this should be allowed to be 0:
                         self_reported_int_value_map[question_code.value] = round(answer.valueInteger, 1)
                     elif question_code.value in ['self_reported_weight_pounds',
                                                  'self_reported_weight_kg'] and answer.valueString:
@@ -754,6 +755,38 @@ class QuestionnaireResponseDao(BaseDao):
                         )
                         return
 
+        concept_code = code_map.get(questionnaire_history.concepts[0].codeId) if questionnaire_history.concepts else None
+        if concept_code:
+            response = response_domain_model.Response(
+                survey_code=concept_code.value,
+                created_datetime=questionnaire_response.created,
+                authored_datetime=questionnaire_response.authored,
+                status=questionnaire_response.status
+            )
+            for answer in questionnaire_response.answers:
+                question = question_map.get(answer.questionId)
+                if question:
+                    question_code = code_map.get(question.codeId)
+
+                    # TODO: need to handle more than just code answers
+                    answer_code = code_dao.get(answer.valueCodeId)
+                    if answer_code:
+                        response.answered_codes[question_code.value.lower()].append(
+                            response_domain_model.Answer(
+                                value=answer_code.value,
+                                data_type=response_domain_model.DataType.CODE
+                            )
+                        )
+
+            processessor = EhrResponseProcessor()
+            updated = processessor.process_response(
+                response=response,
+                summary=participant_summary
+            )
+            if updated:
+                module_changed = True
+                something_changed = True
+
         # Set summary fields for answers that have questions with codes found in QUESTION_CODE_TO_FIELD
         for answer in questionnaire_response.answers:
             question = question_map.get(answer.questionId)
@@ -792,21 +825,21 @@ class QuestionnaireResponseDao(BaseDao):
                             dvehr_consent = QuestionnaireStatus.SUBMITTED
                         elif code and code.value == DVEHRSHARING_CONSENT_CODE_NOT_SURE:
                             dvehr_consent = QuestionnaireStatus.SUBMITTED_NOT_SURE
-                    elif code.value in [EHR_CONSENT_QUESTION_CODE, EHR_SENSITIVE_CONSENT_QUESTION_CODE]:
-                        code = code_dao.get(answer.valueCodeId)
-                        if participant_summary.ehrConsentExpireStatus == ConsentExpireStatus.EXPIRED and \
-                                authored > participant_summary.ehrConsentExpireAuthored:
-                            participant_summary.ehrConsentExpireStatus = ConsentExpireStatus.UNSET
-                            participant_summary.ehrConsentExpireAuthored = None
-                            participant_summary.ehrConsentExpireTime = None
-                        if code and code.value in [CONSENT_PERMISSION_YES_CODE, SENSITIVE_EHR_YES]:
-                            self.consents_provided.append(ConsentType.EHR)
-                            ehr_consent = True
-                            if participant_summary.consentForElectronicHealthRecordsFirstYesAuthored is None:
-                                participant_summary.consentForElectronicHealthRecordsFirstYesAuthored = authored
-                            if participant_summary.ehrConsentExpireStatus == ConsentExpireStatus.EXPIRED and \
-                                    authored < participant_summary.ehrConsentExpireAuthored:
-                                ehr_consent = False
+                    # elif code.value in [EHR_CONSENT_QUESTION_CODE, EHR_SENSITIVE_CONSENT_QUESTION_CODE]:
+                    #     code = code_dao.get(answer.valueCodeId)
+                    #     if participant_summary.ehrConsentExpireStatus == ConsentExpireStatus.EXPIRED and \
+                    #             authored > participant_summary.ehrConsentExpireAuthored:
+                    #         participant_summary.ehrConsentExpireStatus = ConsentExpireStatus.UNSET
+                    #         participant_summary.ehrConsentExpireAuthored = None
+                    #         participant_summary.ehrConsentExpireTime = None
+                    #     if code and code.value in [CONSENT_PERMISSION_YES_CODE, SENSITIVE_EHR_YES]:
+                    #         self.consents_provided.append(ConsentType.EHR)
+                    #         ehr_consent = True
+                    #         if participant_summary.consentForElectronicHealthRecordsFirstYesAuthored is None:
+                    #             participant_summary.consentForElectronicHealthRecordsFirstYesAuthored = authored
+                    #         if participant_summary.ehrConsentExpireStatus == ConsentExpireStatus.EXPIRED and \
+                    #                 authored < participant_summary.ehrConsentExpireAuthored:
+                    #             ehr_consent = False
                     elif code.value == EHR_CONSENT_EXPIRED_QUESTION_CODE:
                         if answer.valueString and answer.valueString == EHR_CONSENT_EXPIRED_YES:
                             participant_summary.ehrConsentExpireStatus = ConsentExpireStatus.EXPIRED
