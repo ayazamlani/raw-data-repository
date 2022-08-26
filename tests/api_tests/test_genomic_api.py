@@ -1472,8 +1472,10 @@ class GenomicOutreachApiV2Test(GenomicApiTestBase, GenomicDataGenMixin):
         fake_date_one = parser.parse('2020-05-30T08:00:01-05:00')
         fake_date_two = parser.parse('2020-05-31T08:00:01-05:00')
         fake_now = clock.CLOCK.now().replace(microsecond=0)
-        module = 'gem'
-        report_state = GenomicReportState.GEM_RPT_READY
+        module_gem = 'gem'
+        module_pgx = 'pgx_v1'
+        gem_report_state = GenomicReportState.GEM_RPT_READY
+        pgx_report_state = GenomicReportState.PGX_RPT_READY
         pids = []
 
         gen_set = self.data_generator.create_database_genomic_set(
@@ -1504,24 +1506,23 @@ class GenomicOutreachApiV2Test(GenomicApiTestBase, GenomicDataGenMixin):
             self.data_generator.create_database_genomic_member_report_state(
                 genomic_set_member_id=gen_member.id,
                 participant_id=participant.participantId,
-                module=module,
-                genomic_report_state=report_state
+                module=module_gem if num % 2 == 0 else module_pgx,
+                genomic_report_state=gem_report_state if num % 2 == 0 else pgx_report_state
             )
 
-            if num % 2 == 0:
-                pids.append(participant.participantId)
-                self.data_generator.create_genomic_result_viewed(
-                    participant_id=participant.participantId,
-                    message_record_id=num + 1,
-                    event_type='result_viewed',
-                    event_authored_time=fake_now,
-                    module_type=module,
-                    first_viewed=fake_now,
-                    last_viewed=fake_now
-                )
+            pids.append(participant.participantId)
+            self.data_generator.create_genomic_result_viewed(
+                participant_id=participant.participantId,
+                message_record_id=num + 1,
+                event_type='result_viewed',
+                event_authored_time=fake_now,
+                module_type=module_gem if num % 2 == 0 else module_pgx,
+                first_viewed=fake_now,
+                last_viewed=fake_now
+            )
 
         total_num_result_set = self.result_dao.get_all()
-        self.assertEqual(len(total_num_result_set), self.num_participants // 2)
+        self.assertEqual(len(total_num_result_set), self.num_participants)
 
         with clock.FakeClock(fake_now):
             resp = self.send_get(

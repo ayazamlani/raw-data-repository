@@ -2013,7 +2013,7 @@ class GenomicOutreachDaoV2(BaseDao):
                 genomic_result_viewed = participant_data.GenomicResultViewed
 
                 result_viewed = 'no'
-                if genomic_result_viewed and genomic_result_viewed.module_type == report_module:
+                if genomic_result_viewed and report_module.lower() in genomic_result_viewed.module_type.lower():
                     result_viewed = 'yes'
 
                 genomic_swap_module = _get_sample_swap_module(
