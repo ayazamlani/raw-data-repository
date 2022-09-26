@@ -1587,3 +1587,23 @@ class GenomicResultWithdrawals(Base):
 
 event.listen(GenomicResultWithdrawals, 'before_insert', model_insert_listener)
 event.listen(GenomicResultWithdrawals, 'before_update', model_update_listener)
+
+
+class GenomicMetricDataFileStorageUpdate(Base):
+    """
+    Used for storing which metrics data files have
+    had storage class updated
+    """
+
+    __tablename__ = "genomic_metric_data_file_storage"
+
+    id = Column(Integer,
+                primary_key=True, autoincrement=True, nullable=False)
+    created = Column(DateTime)
+    modified = Column(DateTime)
+    metric_id = Column(Integer, ForeignKey="genomic_gc_validation_metrics.id", nullable=False)
+    storage_class_updated = Column(String(255), nullable=False)
+
+
+event.listen(GenomicMetricDataFileStorageUpdate, 'before_insert', model_insert_listener)
+event.listen(GenomicMetricDataFileStorageUpdate, 'before_update', model_update_listener)

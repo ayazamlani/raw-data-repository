@@ -249,5 +249,16 @@ cron:
   timezone: America/New_York
   schedule: every day 06:00
   target: offline
+- description: Genomic Array Data File Storage
+  url: /offline/GenomicUpdateStorageClassArray
+  timezone: America/New_York
+  schedule: every tuesday 10:00
+  target: offline
+- description: Genomic Update WGS Data File Storage
+  url: /offline/GenomicUpdateStorageClassWGS
+  timezone: America/New_York
+  schedule: every tuesday 10:00
+  target: offline
+
 
 

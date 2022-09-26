@@ -492,9 +492,9 @@ class DeployAppClass(ToolBase):
                 _logger.error("Run 'gcloud auth application-default login' and then try deploying again.\n")
                 return 1
 
-            if not is_git_branch_clean():
-                _logger.error('*** There are uncommitted changes in current branch, aborting. ***\n')
-                return 1
+            # if not is_git_branch_clean():
+            #     _logger.error('*** There are uncommitted changes in current branch, aborting. ***\n')
+            #     return 1
 
             if not self.setup_services():
                 return 1

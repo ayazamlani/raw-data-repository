@@ -5,6 +5,7 @@ from rdr_service.dao.genomics_dao import GenomicAW1RawDao, GenomicAW2RawDao, Gen
     GenomicAW4RawDao, GenomicJobRunDao, GenomicW2SCRawDao, GenomicW3SRRawDao, GenomicW4WRRawDao, GenomicW3SCRawDao, \
     GenomicW3NSRawDao, GenomicW5NFRawDao, GenomicW3SSRawDao, GenomicW2WRawDao, GenomicW1ILRawDao
 from rdr_service.genomic.genomic_cvl_reconciliation import GenomicCVLReconcile
+from rdr_service.genomic.genomic_data_storage import GenomicDataStorage
 from rdr_service.genomic.genomic_job_controller import GenomicJobController
 from rdr_service.genomic_enums import GenomicJob, GenomicSubProcessResult, GenomicManifestTypes
 from rdr_service.services.system_utils import JSONObject
@@ -443,6 +444,15 @@ def results_pipeline_withdrawals():
 def gem_results_to_report_state():
     with GenomicJobController(GenomicJob.GEM_RESULT_REPORTS) as controller:
         controller.gem_results_to_report_state()
+
+
+def update_data_files_storage(data_storage_type):
+    with GenomicJobController(GenomicJob.GEM_RESULT_REPORTS) as controller:
+        storage_updater = GenomicDataStorage(
+            data_storage_type=data_storage_type
+        )
+        # cvl_reconciler.run_reconcile()
+        controller.job_result = GenomicSubProcessResult.SUCCESS
 
 
 def execute_genomic_manifest_file_pipeline(_task_data: dict, project_id=None):

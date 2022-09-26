@@ -1718,6 +1718,12 @@ class GenomicGCValidationMetricsDao(UpsertableDao, GenomicDaoMixin):
         except OperationalError:
             return GenomicSubProcessResult.ERROR
 
+    def get_metric_data_files_storage_update(self, genome_type):
+        with self.session() as session:
+            session.query(
+
+            )
+
 
 class GenomicPiiDao(BaseDao):
     def __init__(self):
