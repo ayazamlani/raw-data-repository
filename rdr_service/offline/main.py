@@ -520,6 +520,7 @@ def genomic_aw2f_remainder_workflow():
     genomic_pipeline.send_remainder_contamination_manifests()
     return '{"success": "true"}'
 
+
 @app_util.auth_required_cron
 @run_genomic_cron_job('a1_manifest_workflow')
 def genomic_gem_a1_workflow():
@@ -676,14 +677,6 @@ def genomic_members_update_blocklists():
     genomic_pipeline.update_members_blocklists()
     return '{"success": "true"}'
 
-
-@app_util.auth_required_cron
-@run_genomic_cron_job('reconcile_informing_loop_responses')
-def genomic_reconcile_informing_loop_responses():
-    genomic_pipeline.reconcile_informing_loop_responses()
-    return '{"success": "true"}'
-
-
 @app_util.auth_required_cron
 @run_genomic_cron_job('retry_manifest_ingestion_failures')
 def genomic_retry_manifest_ingestion_failures():
@@ -744,6 +737,24 @@ def genomic_reconcile_cvl_alerts():
 def genomic_reconcile_cvl_resolve():
     genomic_pipeline.reconcile_cvl_results(
         reconcile_job_type=GenomicJob.RECONCILE_CVL_RESOLVE
+    )
+    return '{"success": "true"}'
+
+
+@app_util.auth_required_cron
+@run_genomic_cron_job('reconcile_informing_loop_responses')
+def genomic_reconcile_informing_loop_responses():
+    genomic_pipeline.reconcile_normalized_responses_from_metrics(
+        metrics_reconcile_job=GenomicJob.RECONCILE_INFORMING_LOOP_RESPONSES
+    )
+    return '{"success": "true"}'
+
+
+@app_util.auth_required_cron
+@run_genomic_cron_job('reconcile_result_responses')
+def genomic_reconcile_result_responses():
+    genomic_pipeline.reconcile_normalized_responses_from_metrics(
+        metrics_reconcile_job=GenomicJob.RECONCILE_RESULTS_RESPONSES
     )
     return '{"success": "true"}'
 
@@ -1131,6 +1142,12 @@ def _build_pipeline_app():
         OFFLINE_PREFIX + "GenomicReconcileInformingLoopResponses",
         endpoint="reconcile_informing_loop_responses",
         view_func=genomic_reconcile_informing_loop_responses,
+        methods=["GET"]
+    )
+    offline_app.add_url_rule(
+        OFFLINE_PREFIX + "GenomicReconcileResultResponses",
+        endpoint="reconcile_result_responses",
+        view_func=genomic_reconcile_result_responses,
         methods=["GET"]
     )
     offline_app.add_url_rule(

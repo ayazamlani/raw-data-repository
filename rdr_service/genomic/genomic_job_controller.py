@@ -1566,14 +1566,21 @@ class GenomicJobController:
 
         self.reconciler.update_report_states_for_consent_removal(workflow_states)
 
-    def reconcile_informing_loop_responses(self):
+    def reconcile_normalized_responses_from_metrics(self):
         """
         Compare latest non-reconciled user_event_metrics records
-        to the latest participant states in genomic_informing_loop
+        to the latest participant states in EDIT
         Currently supports GEM, HDR or PGx.
         """
+
+        # job_event_map = {
+        #     GenomicJob.RECONCILE_INFORMING_LOOP_RESPONSES: informing_loop_event_mappings,
+        #     GenomicJob.RECONCILE_RESULTS_RESPONSES: ''
+        # }[self.job_id]
+
         modules = {key.split('.')[0] for key in informing_loop_event_mappings.keys()}
         event_mappings = informing_loop_event_mappings
+
         for module in modules:
             # Get unreconciled user_event_metrics records
             latest_events = self.event_dao.get_latest_events(module)

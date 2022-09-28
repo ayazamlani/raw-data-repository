@@ -104,6 +104,7 @@
     "members_state_resolved_workflow": 1,
     "members_update_blocklists": 1,
     "reconcile_informing_loop_responses": 1,
+    "reconcile_result_responses": 1,
     "wgs_reconciliation_workflow": 1,
     "w1_manifest_workflow": 0,
     "w2_manifest_workflow": 0,

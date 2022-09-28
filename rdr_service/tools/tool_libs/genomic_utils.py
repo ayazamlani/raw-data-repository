@@ -1139,7 +1139,7 @@ class GenomicProcessRunner(GenomicManifestBase):
                                       storage_provider=self.gscp,
                                       bq_project_id=self.gcp_env.project
                                       ) as controller:
-                controller.reconcile_informing_loop_responses()
+                controller.reconcile_normalized_responses_from_metrics()
 
         return 0
 

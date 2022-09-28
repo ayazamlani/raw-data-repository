@@ -382,9 +382,9 @@ def update_members_blocklists():
         controller.update_members_blocklists()
 
 
-def reconcile_informing_loop_responses():
-    with GenomicJobController(GenomicJob.RECONCILE_INFORMING_LOOP_RESPONSES) as controller:
-        controller.reconcile_informing_loop_responses()
+def reconcile_normalized_responses_from_metrics(metrics_reconcile_job):
+    with GenomicJobController(metrics_reconcile_job) as controller:
+        controller.reconcile_normalized_responses_from_metrics()
 
 
 def reconcile_gc_data_file_to_table():

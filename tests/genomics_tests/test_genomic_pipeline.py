@@ -6636,7 +6636,9 @@ class GenomicPipelineTest(BaseTestCase):
         )
 
         # Run reconcile job
-        genomic_pipeline.reconcile_informing_loop_responses()
+        genomic_pipeline.reconcile_normalized_responses_from_metrics(
+            metrics_reconcile_job=GenomicJob.RECONCILE_INFORMING_LOOP_RESPONSES
+        )
 
         # Test no incident created for "started" event mismatch
         incidents = self.incident_dao.get_all()
