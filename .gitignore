@@ -49,3 +49,7 @@ htmlcov/
 
 app.yaml
 /rdr_service/.tmp/
+/rdr_service/rdr-passwd.sh
+/rdr_service/2022-09-28_test_ghr3_notifications.csv
+/rdr_service/file.csv
+/rdr_service/test_retention_cloud_fun_3.csv
