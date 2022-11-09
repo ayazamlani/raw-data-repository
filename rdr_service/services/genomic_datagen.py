@@ -351,9 +351,12 @@ class ParticipantGenerator(GeneratorMixin):
 
         self.logger.info(f'Running template type {self.template_type} for {self.num_participants} participants.')
 
+        count = 0
         for _ in range(self.num_participants):
             self.build_participant_default()
             self.build_participant_type_records()
+            count += 1
+            self.logger.info(f'Current count {count}')
 
         self.datagen_member_run_dao.batch_insert_member_records(
             self.run_obj.id,

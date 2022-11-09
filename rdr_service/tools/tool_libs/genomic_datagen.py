@@ -36,14 +36,14 @@ class ParticipantGeneratorTool(ToolBase):
         now_formatted = clock.CLOCK.now().strftime("%Y-%m-%d-%H-%M-%S")
         datagen_run_dao = GenomicDataGenRunDao()
 
-        def _build_external_values(row_dict):
-            excluded_keys = ['participant_count', 'end_to_end_start', 'template_name']
-            for key in excluded_keys:
-                del row_dict[key]
-            for key, value in row_dict.items():
-                if value.isnumeric():
-                    row_dict[key] = int(value)
-            return row_dict
+        # def _build_external_values(row_dict):
+        #     excluded_keys = ['participant_count', 'end_to_end_start', 'template_name']
+        #     for key in excluded_keys:
+        #         del row_dict[key]
+        #     for key, value in row_dict.items():
+        #         if value.isnumeric():
+        #             row_dict[key] = int(value)
+        #     return row_dict
 
         if self.args.output_only_run_id:
 
@@ -96,14 +96,20 @@ class ParticipantGeneratorTool(ToolBase):
             with ParticipantGenerator(
                 logger=_logger
             ) as participant_generator:
-                with open(self.args.spec_path, encoding='utf-8-sig') as file:
-                    csv_reader = csv.DictReader(file)
-                    for row in csv_reader:
-                        participant_generator.run_participant_creation(
-                            num_participants=int(row['participant_count']),
-                            template_type=row['template_name'],
-                            external_values=_build_external_values(row)
-                        )
+                # with open(self.args.spec_path, encoding='utf-8-sig') as file:
+                #     csv_reader = csv.DictReader(file)
+                #     for row in csv_reader:
+                participant_generator.run_participant_creation(
+                    num_participants=10000,
+                    template_type='W4WR',
+                    external_values={
+                        'requesting_site': 'uw',
+                        'withdrawal_status': 1,
+                        'gror_status': 1,
+                        'informing_loop_hdr': 'yes',
+                        'informing_loop_pgx': 'yes'
+                    }
+                )
 
             current_run_id = datagen_run_dao.get_max_run_id()[0]
 
