@@ -89,9 +89,9 @@ class ParticipantGeneratorTool(ToolBase):
             return 0  # bypass generator
 
         if self.args.spec_path:
-            if not os.path.exists(self.args.spec_path):
-                _logger.error(f'File {self.args.spec_path} was not found.')
-                return 1
+            # if not os.path.exists(self.args.spec_path):
+            #     _logger.error(f'File {self.args.spec_path} was not found.')
+            #     return 1
 
             with ParticipantGenerator(
                 logger=_logger
