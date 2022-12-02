@@ -2417,7 +2417,8 @@ class GenomicSchedulingDao(BaseDao):
                 )
             if start_date:
                 records = records.filter(
-                    GenomicAppointmentEvent.event_authored_time > start_date,
+                    or_(GenomicAppointmentEvent.event_authored_time > start_date,
+                        note_alias.event_authored_time > start_date),
                     GenomicAppointmentEvent.event_authored_time < end_date
                 )
 
