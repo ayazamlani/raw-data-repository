@@ -10,7 +10,16 @@ from graphene import (
     Schema
 )
 from graphene import relay
+from sqlalchemy.orm import Query
+
 from rdr_service.api.nph_participant_api_schemas import db
+from rdr_service.model.participant import Participant as DbParticipant
+
+
+class SortableField(Field):
+    def __init__(self, *args, sort_modifier, **kwargs):
+        super(SortableField, self).__init__(*args, **kwargs)
+        self.sort_modifier = sort_modifier
 
 
 class Event(ObjectType):
@@ -27,13 +36,13 @@ class EventCollection(ObjectType):
 
 
 class Sample(ObjectType):
-    parent = List(EventCollection)
-    child = List(EventCollection)
+    parent = Field(EventCollection)
+    child = Field(EventCollection)
 
 
 class SampleCollection(ObjectType):
     ordered = List(Sample)
-    stored = List(Sample)
+    stored = Field(Sample)
 
 
 class Participant(ObjectType):
@@ -114,10 +123,10 @@ class Participant(ObjectType):
     sample_4ml_edtap_1 = Field(SampleCollection)
     sample_ru_1 = Field(SampleCollection)
     sample_ru_2 = Field(SampleCollection)
-    sample_ru_3 = Field(SampleCollection)
+    sampleRU3 = Field(SampleCollection)
     sample_tu_1 = Field(SampleCollection)
     sample_sa_1 = Field(SampleCollection)
-    sample_sa_2 = Field(SampleCollection)
+    sampleSA2 = Field(SampleCollection)
     sample_ha_1 = Field(SampleCollection)
     sample_na_1 = Field(SampleCollection)
     sample_na_2 = Field(SampleCollection)
@@ -134,8 +143,12 @@ class Participant(ObjectType):
     city = Field(String)
     street_address = Field(String)
     enrollment_site = Field(String, description='This field will not be null')
-    participant_nph_id = Field(Int, description='NPH Participant unique identifier')
-    bio_bank_id = Field(Int, description='Participant\'s BioBank ID')
+    participantNphId = SortableField(Int, description='NPH Participant unique identifier',
+                             sort_modifier=lambda query: query.order_by(DbParticipant.participantId))
+    biobankId = SortableField(
+        Int, description='Participant\'s BioBank ID',
+        sort_modifier=lambda query: query.order_by(DbParticipant.biobankId)
+    )
     middle_name = String()
     street_address2 = String()
     phone_number = String()
@@ -149,7 +162,7 @@ class Participant(ObjectType):
     race = Field(String, description='Participant race')
     sex = Field(String, description='Participant')
     sexual_orientation = Field(String, description='Participant sexual orientation')
-    last_modified = Field(Date)
+    lastModified = SortableField(Date, sort_modifier=lambda query: query.order_by(DbParticipant.lastModified))
     ehr_consent_expire_status = Field(String)
     withdrawal_status = Field(String)
     withdrawal_reason = Field(String)
@@ -191,15 +204,26 @@ class ParticipantQuery(ObjectType):
         interfaces = (relay.Node,)
         connection_class = ParticipantConnection
 
-    participant = relay.ConnectionField(ParticipantConnection, nph_id=Int(required=False))
+    participant = relay.ConnectionField(
+        ParticipantConnection, nph_id=Int(required=False), sort_by=String(required=False)
+    )
 
-    def resolve_participant(root, info, nph_id=None, **kwargs):
-        print(info, kwargs)
+    def resolve_participant(root, info, nph_id=None, sort_by=None, **kwargs):
+
+        query = Query(DbParticipant)
+
+        # sampleSA2:ordered:child:current:time
+        if sort_by:
+            sort_parts = sort_by.split(':')
+            for sort_field_name in sort_parts:
+                sort_field: SortableField = getattr(Participant, sort_field_name)
+                query = sort_field.sort_modifier(query)
+
         try:
             if nph_id:
                 return [x for x in db.datas if nph_id == x.get("participant_nph_id")]
             else:
-                return db.datas
+                return db.loadParticipantData(query)
         except Exception as ex:
             raise ex
 
