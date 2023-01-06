@@ -99,5 +99,5 @@ if __name__ == "__main__":
     parser.add_argument("--value")
     args = parser.parse_args()
 
-    print('hello value', args.value)
+    print('hello value', args.value[2:8])
     time.sleep(60)
