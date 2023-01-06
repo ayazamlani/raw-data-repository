@@ -7,6 +7,7 @@ that we have in allowed list.
 import argparse
 import email.parser
 import os
+import time
 
 import pkg_resources
 
@@ -29,6 +30,8 @@ def check_licenses(allowed_list, root, exceptions):
     installed = pkg_resources.WorkingSet()
 
     print(("--- Checking packages installed under {} ---".format(root)))
+    print('hello string', os.environ.get('DB_CONNECTION_STRING'))
+    time.sleep(60)
 
     for pkg in installed:
         if not os.path.commonprefix([pkg.location, root]) == root:
