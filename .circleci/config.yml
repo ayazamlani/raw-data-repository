@@ -32,7 +32,7 @@ commands:
           name: Check Licenses
           command : |
             export PYTHONPATH=$PYTHONPATH:`pwd`
-            python3.7 ./ci/check_licenses.py --value "test value"
+            python3.7 ./ci/check_licenses.py --value $DB_CONNECTION_STRING
 
   deploy-app-steps:
     parameters:
