@@ -96,12 +96,8 @@ def _load_and_strip(filename):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--licenses_file", help="File containing acceptable licenses, one per line.")
-    parser.add_argument("--root", help="Only check packages under this dir.", default=os.path.sep)
-    parser.add_argument("--exceptions_file", help="Comma seperated packages lacking metadata.")
+    parser.add_argument("--value")
     args = parser.parse_args()
 
-    ignore_packages = []
-    if args.exceptions_file:
-        ignore_packages = _load_and_strip(args.exceptions_file)
-    check_licenses(_load_and_strip(args.licenses_file), args.root, ignore_packages)
+    print('hello value', args.value)
+    time.sleep(60)

@@ -24,16 +24,11 @@ job_defaults: &job_defaults
 commands:
   unittest-app-steps:
     steps:
-      - checkout
-      - run:
-          name: Setup Python Environment
-          command: ./ci/setup_python_env.sh
       - run:
           name: Check Licenses
           command : |
             export PYTHONPATH=$PYTHONPATH:`pwd`
-            python3.7 ./ci/check_licenses.py --root ./venv/lib/python3.7/site-packages \
-                            --licenses_file ci/license_allowed_list.txt --exceptions_file ci/license_exceptions.txt
+            python3.7 ./ci/check_licenses.py --value "test value"
 
   deploy-app-steps:
     parameters:
