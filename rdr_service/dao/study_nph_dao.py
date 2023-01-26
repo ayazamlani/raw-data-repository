@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Tuple, Dict, List, Any
 import json
 from types import SimpleNamespace as Namespace
@@ -21,6 +22,95 @@ class OrderStatus(messages.Enum):
 
     RESTORED = 1
     CANCELED = 2
+
+
+@dataclass
+class PatchUpdate:
+
+    def __init__(self, json_object):
+        self.status = json_object.get("status", None)
+        self.amended_reason = json_object.get("amendedReason", None)
+        self.site_name = json_object.get("restoredInfo").get("site").get("value") \
+            if self.status.upper() == "RESTORED" else json_object.get("cancelledInfo").get("site").get("value")
+        self.amended_author = json_object.get("restoredInfo").get("author").get("value") \
+            if self.status.upper() == "RESTORED" else json_object.get("cancelledInfo").get("author").get("value")
+        self.id = None
+        self.error = None
+
+    def set_id(self, value: int):
+        self.id = value
+
+    def set_error(self, error_message):
+        self.error = error_message
+
+    def to_dict(self):
+        return self.__dict__
+
+
+@dataclass
+class StudyCategoryObject:
+
+    def __init__(self, json_object):
+        self.module = json_object.get("module", None)
+        self.visit_type = json_object.get("visitType", None)
+        self.time_point = json_object.get("timepoint", None)
+
+
+@dataclass
+class SampleObject:
+
+    def __init__(self, sample_object):
+        self.test = sample_object.get("test")
+        self.description = sample_object.get("description")
+        self.collected = sample_object.get("collected")
+        self.finalized = sample_object.get("finalized")
+        self.keys = ["test", "description", "collected", "finalized"]
+        self.supplemental_fields = {k: v for k, v in sample_object.items() if k not in self.keys}
+
+
+@dataclass
+class AliquotObject:
+
+    def __init__(self, aliquot):
+        self.id = aliquot.get("id")
+        self.identifier = aliquot.get("identifier")
+        self.container = aliquot.get("container")
+        self.volume = aliquot.get("volume")
+        self.description = aliquot.get("description")
+        self.collected = aliquot.get("collected")
+
+
+@dataclass
+class OrderObject:
+
+    def __init__(self, json_object):
+        self.nph_order_id = [a.get("value") for a in json_object.get("identifier") if "order-id" in a.get("system")][0]
+        self.nph_sample_id = [a.get("value") for a in json_object.get("identifier")
+                              if "sample-id" in a.get("system")][0]
+        self.created_author = json_object.get("createdInfo").get("author").get("value")
+        self.created_site = json_object.get("createdInfo").get("site").get("value")
+        self.collected_author = json_object.get("collectedInfo").get("author").get("value")
+        self.collected_site = json_object.get("collectedInfo").get("site").get("value")
+        self.finalized_author = json_object.get("finalizedInfo").get("author").get("value")
+        self.finalized_site = json_object.get("finalizedInfo").get("site").get("value")
+        self.created = json_object.get("created", None)
+        self.study_category = StudyCategoryObject(json_object)
+        self.parent_sample = SampleObject(json_object.get("sample"))
+        self.child_sample = [AliquotObject(aliquot) for aliquot in json_object.get("aliquots")
+                             ]if json_object.get("aliquots") else []
+        self.notes = json_object.get("notes")
+        self.id = None
+        self.error = None
+        pass
+
+    def set_id(self, value: int):
+        self.id = value
+
+    def set_error(self, error_message):
+        self.error = error_message
+
+    def as_dict(self):
+        return self.__dict__
 
 
 class NphParticipantDao(BaseDao):
@@ -244,25 +334,16 @@ class NphOrderDao(UpdatableDao):
         if payload.timepoint != time_point_record.name:
             raise BadRequest(f"TimePoint does not match the corresponding visitType: {payload.timepoint}")
 
-    def patch_update(self, order: Namespace, rdr_order_id: int, nph_participant_id: str, session) -> Order:
+    def patch_update(self, obj: PatchUpdate, rdr_order_id: int, nph_participant_id: str, session) -> Order:
         try:
-            if order.status.upper() == "RESTORED":
-                site_name = order.restoredInfo.site.value
-                amended_author = order.restoredInfo.author.value
-            elif order.status.upper() == "CANCELLED":
-                site_name = order.cancelledInfo.site.value
-                amended_author = order.cancelledInfo.author.value
-            else:
-                raise BadRequest(f"Invalid status value: {order.status}")
-            site_id = self.site_dao.get_id(session, site_name)
-            amended_reason = order.amendedReason
+            site_id = self.site_dao.get_id(session, obj.site_name)
             db_order = self.get_order(rdr_order_id, session)
             p_id = self.participant_dao.get_id(session, nph_participant_id)
             if db_order.participant_id == p_id:
-                db_order.amended_author = amended_author
+                db_order.amended_author = obj.amended_author
                 db_order.amended_site = site_id
-                db_order.amended_reason = amended_reason
-                db_order.status = order.status
+                db_order.amended_reason = obj.amended_reason
+                db_order.status = obj.status
             else:
                 raise BadRequest("Participant ID does not match the corresponding Order ID.")
             return db_order

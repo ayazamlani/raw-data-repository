@@ -10,7 +10,10 @@ from itertools import zip_longest
 from werkzeug.exceptions import BadRequest, NotFound
 from rdr_service.dao import database_factory
 from sqlalchemy.orm import Query
+from marshmallow import ValidationError
 
+from rdr_service.services.nph_biobank_order_payload_validation import OrderSchema, RestoredUpdateSchema, \
+    CancelledUpdateSchema
 
 from rdr_service.dao.study_nph_dao import (
     NphParticipantDao,
@@ -20,7 +23,12 @@ from rdr_service.dao.study_nph_dao import (
     NphOrderedSampleDao,
     NphSampleUpdateDao,
     NphBiobankFileExportDao,
-    NphSampleExportDao
+    NphSampleExportDao,
+    PatchUpdate,
+    OrderObject,
+    SampleObject,
+    AliquotObject,
+    StudyCategoryObject
 )
 from rdr_service.clock import FakeClock
 from rdr_service.model.study_nph import (
@@ -31,7 +39,7 @@ from rdr_service.model.study_nph import (
     OrderedSample,
     SampleUpdate,
     BiobankFileExport,
-    SampleExport
+    SampleExport,
 )
 from tests.helpers.unittest_base import BaseTestCase
 
@@ -49,31 +57,31 @@ TEST_SAMPLE = {
     }],
     "createdInfo": {
         "author": {
-            "system": "https://www.pmi-ops.org\/nph-username",
+            "system": "https://www.pmi-ops.org/nph-username",
             "value": "test@example.com"
         },
         "site": {
-            "system": "https://www.pmi-ops.org\/site-id",
+            "system": "https://www.pmi-ops.org/site-id",
             "value": "nph-site-testa"
         }
     },
     "collectedInfo": {
         "author": {
-            "system": "https://www.pmi-ops.org\/nph-username",
+            "system": "https://www.pmi-ops.org/nph-username",
             "value": "test@example.com"
         },
         "site": {
-            "system": "https://www.pmi-ops.org\/site-id",
+            "system": "https://www.pmi-ops.org/site-id",
             "value": "nph-site-testa"
         }
     },
     "finalizedInfo": {
         "author": {
-            "system": "https://www.pmi-ops.org\/nph-username",
+            "system": "https://www.pmi-ops.org/nph-username",
             "value": "test@example.com"
         },
         "site": {
-            "system": "https://www.pmi-ops.org\/site-id",
+            "system": "https://www.pmi-ops.org/site-id",
             "value": "hnphpo-site-testa"
         }
     },
@@ -95,31 +103,31 @@ TEST_URINE_SAMPLE = {
     }],
     "createdInfo": {
         "author": {
-            "system": "https://www.pmi-ops.org\/nph-username",
+            "system": "https://www.pmi-ops.org/nph-username",
             "value": "test@example.com"
         },
         "site": {
-            "system": "https://www.pmi-ops.org\/site-id",
+            "system": "https://www.pmi-ops.org/site-id",
             "value": "nph-site-testa"
         }
     },
     "collectedInfo": {
         "author": {
-            "system": "https://www.pmi-ops.org\/nph-username",
+            "system": "https://www.pmi-ops.org/nph-username",
             "value": "test@example.com"
         },
         "site": {
-            "system": "https://www.pmi-ops.org\/site-id",
+            "system": "https://www.pmi-ops.org/site-id",
             "value": "nph-site-testa"
         }
     },
     "finalizedInfo": {
         "author": {
-            "system": "https://www.pmi-ops.org\/nph-username",
+            "system": "https://www.pmi-ops.org/nph-username",
             "value": "test@example.com"
         },
         "site": {
-            "system": "https://www.pmi-ops.org\/site-id",
+            "system": "https://www.pmi-ops.org/site-id",
             "value": "hnphpo-site-testa"
         }
     },
@@ -186,6 +194,103 @@ CANCEL_PAYLOAD = {
                  }
     }
 }
+
+
+class NphOrderObjectTest(BaseTestCase):
+
+    def test_order_payload(self):
+        order_payload = OrderObject(TEST_URINE_SAMPLE)
+        nph_info = [order_payload.nph_order_id, order_payload.nph_sample_id]
+        for counter, _ in enumerate(TEST_URINE_SAMPLE.get("identifier")):
+            self.assertEqual(nph_info[counter], TEST_URINE_SAMPLE.get("identifier")[counter].get("value"))
+        self.assertEqual(order_payload.created_author, TEST_URINE_SAMPLE.get("createdInfo").get("author").get("value"))
+        self.assertEqual(order_payload.created_site, TEST_URINE_SAMPLE.get("createdInfo").get("site").get("value"))
+        self.assertEqual(order_payload.collected_author,
+                         TEST_URINE_SAMPLE.get("collectedInfo").get("author").get("value"))
+        self.assertEqual(order_payload.collected_site, TEST_URINE_SAMPLE.get("collectedInfo").get("site").get("value"))
+        self.assertEqual(order_payload.finalized_author,
+                         TEST_URINE_SAMPLE.get("finalizedInfo").get("author").get("value"))
+        self.assertEqual(order_payload.finalized_site, TEST_URINE_SAMPLE.get("finalizedInfo").get("site").get("value"))
+        self.assertEqual(order_payload.created, TEST_URINE_SAMPLE.get("created"))
+        self.assertEqual(order_payload.notes, TEST_URINE_SAMPLE.get("notes"))
+        self.assertEqual(order_payload.study_category.module, TEST_URINE_SAMPLE.get("module"))
+        self.assertEqual(order_payload.study_category.visit_type, TEST_URINE_SAMPLE.get("visitType"))
+        self.assertEqual(order_payload.study_category.time_point, TEST_URINE_SAMPLE.get("timepoint"))
+        self.assertEqual(order_payload.parent_sample.test, TEST_URINE_SAMPLE.get("sample").get("test"))
+        self.assertEqual(order_payload.parent_sample.description, TEST_URINE_SAMPLE.get("sample").get("description"))
+        self.assertEqual(order_payload.parent_sample.collected, TEST_URINE_SAMPLE.get("sample").get("collected"))
+        self.assertEqual(order_payload.parent_sample.finalized, TEST_URINE_SAMPLE.get("sample").get("finalized"))
+        self.assertEqual(order_payload.parent_sample.supplemental_fields,
+                         {"color": TEST_URINE_SAMPLE.get("sample").get("color"),
+                          "clarity": TEST_URINE_SAMPLE.get("sample").get("clarity")})
+        for counter, aliquot in enumerate(order_payload.child_sample):
+            self.assertEqual(TEST_URINE_SAMPLE.get("aliquots")[counter].get("id"), aliquot.id)
+            self.assertEqual(TEST_URINE_SAMPLE.get("aliquots")[counter].get("identifier"), aliquot.identifier)
+            self.assertEqual(TEST_URINE_SAMPLE.get("aliquots")[counter].get("container"), aliquot.container)
+            self.assertEqual(TEST_URINE_SAMPLE.get("aliquots")[counter].get("volume"), aliquot.volume)
+            self.assertEqual(TEST_URINE_SAMPLE.get("aliquots")[counter].get("description"), aliquot.description)
+            self.assertEqual(TEST_URINE_SAMPLE.get("aliquots")[counter].get("collected"), aliquot.collected)
+
+    def test_study_category(self):
+        study_category = StudyCategoryObject(TEST_URINE_SAMPLE)
+        self.assertEqual(study_category.module, TEST_URINE_SAMPLE.get("module"))
+        self.assertEqual(study_category.visit_type, TEST_URINE_SAMPLE.get("visitType"))
+        self.assertEqual(study_category.time_point, TEST_URINE_SAMPLE.get("timepoint"))
+
+    def test_parent_sample(self):
+        parent_sample = SampleObject(TEST_URINE_SAMPLE.get("sample"))
+        self.assertEqual(parent_sample.test, TEST_URINE_SAMPLE.get("sample").get("test"))
+        self.assertEqual(parent_sample.description, TEST_URINE_SAMPLE.get("sample").get("description"))
+        self.assertEqual(parent_sample.collected, TEST_URINE_SAMPLE.get("sample").get("collected"))
+        self.assertEqual(parent_sample.finalized, TEST_URINE_SAMPLE.get("sample").get("finalized"))
+        self.assertEqual(parent_sample.supplemental_fields,
+                         {"color": TEST_URINE_SAMPLE.get("sample").get("color"),
+                          "clarity": TEST_URINE_SAMPLE.get("sample").get("clarity")})
+
+    def test_child_sample(self):
+        for aliquot in TEST_URINE_SAMPLE.get("aliquots"):
+            aliquot_payload = AliquotObject(aliquot)
+            self.assertEqual(aliquot.get("id"), aliquot_payload.id)
+            self.assertEqual(aliquot.get("identifier"), aliquot_payload.identifier)
+            self.assertEqual(aliquot.get("container"), aliquot_payload.container)
+            self.assertEqual(aliquot.get("volume"), aliquot_payload.volume)
+            self.assertEqual(aliquot.get("description"), aliquot_payload.description)
+            self.assertEqual(aliquot.get("collected"), aliquot_payload.collected)
+
+    def test_validate_json(self):
+        result = OrderSchema().load(TEST_URINE_SAMPLE)
+        self.assertEqual(TEST_URINE_SAMPLE, result)
+
+    def test_validation_error(self):
+        with self.assertRaises(ValidationError):
+            OrderSchema().load(TEST_SAMPLE)
+
+
+class NphPatchUpdateObjectTest(BaseTestCase):
+
+    def test_restored_payload(self):
+        restore_payload = PatchUpdate(RESTORED_PAYLOAD)
+        self.assertEqual(restore_payload.status, RESTORED_PAYLOAD.get("status"))
+        self.assertEqual(restore_payload.amended_reason, RESTORED_PAYLOAD.get("amendedReason"))
+        self.assertEqual(restore_payload.site_name, RESTORED_PAYLOAD.get("restoredInfo").get("site").get("value"))
+        self.assertEqual(restore_payload.amended_author,
+                         RESTORED_PAYLOAD.get("restoredInfo").get("author").get("value"))
+
+    def test_cancelled_payload(self):
+        cancel_payload = PatchUpdate(CANCEL_PAYLOAD)
+        self.assertEqual(cancel_payload.status, CANCEL_PAYLOAD.get("status"))
+        self.assertEqual(cancel_payload.amended_reason, CANCEL_PAYLOAD.get("amendedReason"))
+        self.assertEqual(cancel_payload.site_name, CANCEL_PAYLOAD.get("cancelledInfo").get("site").get("value"))
+        self.assertEqual(cancel_payload.amended_author,
+                         CANCEL_PAYLOAD.get("cancelledInfo").get("author").get("value"))
+
+    def test_restored_payload_validation(self):
+        restore_payload = RestoredUpdateSchema().load(RESTORED_PAYLOAD)
+        self.assertEqual(RESTORED_PAYLOAD, restore_payload)
+
+    def test_cancelled_payload_validation(self):
+        cancelled_payload = CancelledUpdateSchema().load(CANCEL_PAYLOAD)
+        self.assertEqual(CANCEL_PAYLOAD, cancelled_payload)
 
 
 class NphParticipantDaoTest(BaseTestCase):
@@ -609,15 +714,15 @@ class NphOrderDaoTest(BaseTestCase):
     @patch('rdr_service.dao.study_nph_dao.NphSiteDao.get_id')
     def test_patch_restored_update(self, site_id, order, query_filter):
         session = MagicMock()
-        request = json.loads(json.dumps(RESTORED_PAYLOAD), object_hook=lambda d: Namespace(**d))
+        request = PatchUpdate(RESTORED_PAYLOAD)
         site_id.return_value = 1
         order.return_value = Order(id=1, participant_id=1)
         query_filter.return_value.first.return_value = Participant(id=1)
         order_dao = NphOrderDao()
         result = order_dao.patch_update(request, 1, "10001", session)
         self.assertEqual(1, result.amended_site)
-        self.assertEqual(request.restoredInfo.author.value, result.amended_author)
-        self.assertEqual(request.amendedReason, result.amended_reason)
+        self.assertEqual(request.amended_author, result.amended_author)
+        self.assertEqual(request.amended_reason, result.amended_reason)
         self.assertEqual("RESTORED", result.status.upper())
 
     @patch('rdr_service.dao.study_nph_dao.Query.filter')
@@ -625,15 +730,15 @@ class NphOrderDaoTest(BaseTestCase):
     @patch('rdr_service.dao.study_nph_dao.NphSiteDao.get_id')
     def test_patch_cancel_update(self, site_id, order, query_filter):
         session = MagicMock()
-        request = json.loads(json.dumps(CANCEL_PAYLOAD), object_hook=lambda d: Namespace(**d))
+        request = PatchUpdate(CANCEL_PAYLOAD)
         site_id.return_value = 1
         order.return_value = Order(id=1, participant_id=1)
         query_filter.return_value.first.return_value = Participant(id=1)
         order_dao = NphOrderDao()
         result = order_dao.patch_update(request, 1, "10001", session)
         self.assertEqual(1, result.amended_site)
-        self.assertEqual(request.cancelledInfo.author.value, result.amended_author)
-        self.assertEqual(request.amendedReason, result.amended_reason)
+        self.assertEqual(request.amended_author, result.amended_author)
+        self.assertEqual(request.amended_reason, result.amended_reason)
         self.assertEqual("CANCELLED", result.status.upper())
 
     @patch('rdr_service.dao.study_nph_dao.NphParticipantDao.get_participant')

@@ -1,15 +1,20 @@
 import json
 import logging
 from flask import request
+from marshmallow import ValidationError
 
 from werkzeug.exceptions import BadRequest, NotFound
 from sqlalchemy import exc
 
 from rdr_service.api.base_api import UpdatableApi
 from rdr_service.dao import database_factory
-from rdr_service.dao.study_nph_dao import NphOrderDao
+from rdr_service.dao.study_nph_dao import NphOrderDao, PatchUpdate
 from rdr_service.api_util import RTI_AND_HEALTHPRO
 from rdr_service.app_util import auth_required
+from rdr_service.services.nph_biobank_order_payload_validation import (
+    RestoredUpdateSchema,
+    CancelledUpdateSchema
+)
 
 
 class CustomEncoder(json.JSONEncoder):
@@ -17,9 +22,10 @@ class CustomEncoder(json.JSONEncoder):
         return o.__dict__
 
 
-def construct_response(order):
+def construct_response(obj):
     # Construct Response payload
-    return json.loads(json.dumps(order, indent=4, cls=CustomEncoder))
+    #return json.loads(json.dumps(order, indent=4, cls=CustomEncoder))
+    return obj.__dict__
 
 
 class NphOrderApi(UpdatableApi):
@@ -92,20 +98,28 @@ class NphOrderApi(UpdatableApi):
             logging.error(message)
             return {"error": message}, 400
         if rdr_order_id and nph_participant_id:
+            json_obj = request.get_json(force=True)
             try:
+                RestoredUpdateSchema().load(json_obj) if json_obj["status"].upper() == "RESTORED" \
+                    else CancelledUpdateSchema().load(json_obj)
                 with database_factory.get_database().session() as session:
-                    self.dao.set_order_cls(request.get_data())
-                    order = self.dao.order_cls
-                    self.dao.patch_update(order, rdr_order_id, nph_participant_id, session)
+                    patch_update = PatchUpdate(json_obj)
+                    self.dao.patch_update(patch_update, rdr_order_id, nph_participant_id, session)
                     session.commit()
-                    order.id = rdr_order_id
-                    return construct_response(order), 200
+                    patch_update.set_id(rdr_order_id)
+                    return construct_response(patch_update).pop("error"), 200
+            except ValidationError as val_error:
+                logging.error(val_error.messages)
+                return val_error.messages, 400
             except NotFound as not_found:
                 logging.error(not_found.description)
-                return construct_response(order), 404
+                patch_update.set_error(not_found.description)
+                return construct_response(patch_update), 404
             except BadRequest as bad_request:
                 logging.error(bad_request.description)
-                return construct_response(order), 400
+                patch_update.set_error(bad_request.description)
+                return construct_response(patch_update), 400
             except exc.SQLAlchemyError as sql:
                 logging.error(sql)
-                return construct_response(order), 400
+                patch_update.set_error(sql.__dict__['orig'])
+                return construct_response(patch_update), 400

@@ -17,6 +17,7 @@ from rdr_service import config
 
 NPH_BIOBANK_PREFIX = NPH_PROD_BIOBANK_PREFIX if config.GAE_PROJECT == "all-of-us-rdr-prod" else NPH_TEST_BIOBANK_PREFIX
 
+
 class SortableField(Field):
     def __init__(self, *args, sort_modifier=None, filter_modifier=None, **kwargs):
         super(SortableField, self).__init__(*args, **kwargs)
