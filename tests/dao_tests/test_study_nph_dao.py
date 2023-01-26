@@ -284,6 +284,18 @@ class NphPatchUpdateObjectTest(BaseTestCase):
         self.assertEqual(cancel_payload.amended_author,
                          CANCEL_PAYLOAD.get("cancelledInfo").get("author").get("value"))
 
+    def test_cancelled_payload_dict(self):
+        cancel_payload = PatchUpdate(CANCEL_PAYLOAD)
+        CANCEL_PAYLOAD["id"] = None
+        CANCEL_PAYLOAD["error"] = None
+        json_payload = cancel_payload.to_dict()
+        self.assertEqual(CANCEL_PAYLOAD['amendedReason'], json_payload['amended_reason'])
+        self.assertEqual(CANCEL_PAYLOAD['error'], json_payload['error'])
+        self.assertEqual(CANCEL_PAYLOAD['id'], json_payload['id'])
+        self.assertEqual(CANCEL_PAYLOAD['status'], json_payload['status'])
+        self.assertEqual(CANCEL_PAYLOAD['cancelledInfo']['site']['value'], json_payload['site_name'])
+        self.assertEqual(CANCEL_PAYLOAD['cancelledInfo']['author']['value'], json_payload['amended_author'])
+
     def test_restored_payload_validation(self):
         restore_payload = RestoredUpdateSchema().load(RESTORED_PAYLOAD)
         self.assertEqual(RESTORED_PAYLOAD, restore_payload)

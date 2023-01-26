@@ -167,7 +167,7 @@ class NphStudyCategoryDao(UpdatableDao):
     def from_client_json(self):
         pass
 
-    def get_id(self, session, order: Namespace) -> Tuple[bool, str]:
+    def get_id(self, session, obj: StudyCategory) -> Tuple[bool, str]:
         # Compare the module, vistType and time point using self join
         # return False and empty string if module not exist
         # otherwise, return True and time point id
@@ -177,8 +177,8 @@ class NphStudyCategoryDao(UpdatableDao):
         query = Query(time_point)
         query.session = session
         result = query.filter(module.id == visit_type.parent_id, visit_type.id == time_point.parent_id,
-                              module.name == order.module, visit_type.name == order.visitType,
-                              time_point.name == order.timepoint).first()
+                              module.name == obj.module, visit_type.name == obj.visitType,
+                              time_point.name == obj.timepoint).first()
         if not result:
             return False, ""
         else:
@@ -394,8 +394,8 @@ class NphOrderDao(UpdatableDao):
         else:
             return False, None
 
-    def get_study_category_id(self, session):
-        return self.study_category_dao.get_id(session, self.order_cls)
+    def get_study_category_id(self, session, study_category: StudyCategory):
+        return self.study_category_dao.get_id(session, study_category)
 
     def set_order_cls(self, resource_data):
         self.order_cls = json.loads(resource_data, object_hook=lambda d: Namespace(**d))
