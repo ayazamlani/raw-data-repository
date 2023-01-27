@@ -1,0 +1,86 @@
+{
+    "resourceType": "Bundle",
+    "type": "collection",
+    "entry": [
+        {
+            "resource": {
+                "resourceType": "Patient",
+                "id": "3a766ab1-630f-4d31-959c-52b9fe9fcb00",
+                "identifier": [
+                    {
+                        "system": "https://nutritionforprecisionhealth.org/patient-identifier",
+                        "value": "1000100200203"
+                    }
+                ]
+            }
+        },
+        {
+            "resource": {
+                "resourceType": "Encounter",
+                "status": "arrived",
+                "class": {
+                    "system": "https://www.rti.org/study-stage",
+                    "code": "module1"
+                },
+                "type": [
+                    {
+                        "coding": [
+                            {
+                                "system": "https://www.rti.org/study-encounter-type",
+                                "code": "consent"
+                            }
+                        ]
+                    }
+                ],
+                "subject": {
+                    "reference": "Patient/3a766ab1-630f-4d31-959c-52b9fe9fcb00"
+                },
+                "period": {
+                    "start": "2022-02-10T13:55:51.000000Z"
+                }
+            }
+        },
+        {
+            "resource": {
+                "resourceType": "Encounter",
+                "status": "finished",
+                "class": {
+                    "system": "https://www.rti.org/study-stage",
+                    "code": "pairing"
+                },
+                "type": [
+                    {
+                        "coding": [
+                            {
+                                "system": "https://www.rti.org/paired-site",
+                                "code": "pairedSite03"
+                            }
+                        ]
+                    }
+                ],
+                "subject": {
+                    "reference": "Patient/3a766ab1-630f-4d31-959c-52b9fe9fcb00"
+                },
+                "period": {
+                    "start": "2022-01-25T09:44:05.182000Z"
+                }
+            }
+        },
+        {
+            "resource": {
+                "resourceType": "Encounter",
+                "status": "finished",
+                "class": {
+                    "system": "https://www.rti.org/study-stage",
+                    "code": "deactivation"
+                },
+                "subject": {
+                    "reference": "Patient/3a766ab1-630f-4d31-959c-52b9fe9fcb00"
+                },
+                "period": {
+                    "start": "2022-02-10T13:55:50.512000Z"
+                }
+            }
+        }
+    ]
+}

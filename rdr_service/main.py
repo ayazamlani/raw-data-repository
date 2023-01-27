@@ -44,6 +44,7 @@ from rdr_service.api.message_broker_api import MessageBrokerApi
 from rdr_service.api.onsite_verification_api import OnsiteVerificationApi
 from rdr_service.api.nph_participant_biobank_order_api import NphOrderApi
 from rdr_service.api.nph_participant_api import nph_participant
+from rdr_service.api.nph.nph_intake_api import NphIntakeApi
 
 from rdr_service.services.flask import app, API_PREFIX, flask_warmup, flask_start, flask_stop
 from rdr_service.services.gcp_logging import begin_request_logging, end_request_logging, \
@@ -88,7 +89,6 @@ api.add_resource(
     endpoint="participant.researchId",
     methods=["GET"],
 )
-
 
 api.add_resource(
     ParticipantSummaryApi,
@@ -388,6 +388,17 @@ api.add_resource(
     endpoint='nph.participant.biobank_order',
     methods=['POST','PUT', 'PATCH']
 )
+
+#
+# NPH Intake API DA-3142 dchan
+#
+api.add_resource(
+    NphIntakeApi,
+    API_PREFIX + "nph/Intake",
+    endpoint="nph.intake",
+    methods=["GET", "POST", "PUT"],
+)
+
 
 app.add_url_rule(
     API_PREFIX + "PhysicalMeasurements/_history",

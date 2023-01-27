@@ -693,3 +693,16 @@ class NphSampleExportDao(BaseDao):
 
     def get_id(self, obj: SampleExport):
         return obj.id
+
+
+class NphIntakeDao(BaseDao):
+
+    def __init__(self):
+        super(NphIntakeDao, self).__init__(SampleExport)
+        self.nph_participant_event_activity_dao = NphParticipantEventActivityDao()
+
+    def from_client_json(self):
+        pass
+
+    def get_id(self, obj: SampleExport):
+        return obj.id
