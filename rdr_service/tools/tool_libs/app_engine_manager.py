@@ -392,12 +392,19 @@ class DeployAppClass(ToolBase):
 
         # Run database migration
         _logger.info('Applying database migrations...')
-        alembic = AlembicManagerClass(self.args, self.gcp_env, ['upgrade', 'heads'])
-        if alembic.run() != 0:
-            _logger.warning('Deploy process stopped.')
-            return 1
-        else:
-            self.add_jira_comment(f'Migration results:\n{alembic.output}')
+
+        apply_migrations_for_all_databases = [
+            ["upgrade", "heads"],
+            ["-c", "alembic_nph.ini", "upgrade", "heads"],
+            ["-c", "alembic_rex.ini", "upgrade", "heads"]
+        ]
+        for args in apply_migrations_for_all_databases:
+            alembic = AlembicManagerClass(self.args, self.gcp_env, args)
+            if alembic.run() != 0:
+                _logger.warning('Deploy process stopped.')
+                return 1
+            else:
+                self.add_jira_comment(f'Migration results:\n{alembic.output}')
 
         _logger.info('Preparing configuration files...')
         config_files = self.setup_service_config_files()
@@ -500,7 +507,7 @@ class DeployAppClass(ToolBase):
                 return 1
 
             self.deploy_version = self.args.deploy_as if self.args.deploy_as else \
-                                    self.args.git_target.replace('.', '-')
+                self.args.git_target.replace('.', '-')
 
             running_services = gcp_get_app_versions(running_only=True)
             if not running_services:
@@ -514,7 +521,7 @@ class DeployAppClass(ToolBase):
             _logger.info('  App Source Path       : {0}'.format(clr.fmt(self.deploy_root)))
             _logger.info('  Promote               : {0}'.format(clr.fmt('No' if self.args.no_promote else 'Yes')))
 
-            if 'JIRA_API_USER_NAME' in os.environ and 'JIRA_API_USER_PASSWORD' in os.environ:
+            if 'JIRA_API_USER_NAME' in os.environ and 'JIRA_API_TOKEN' in os.environ:
                 self.jira_ready = True
                 self._jira_handler = JiraTicketHandler()
 

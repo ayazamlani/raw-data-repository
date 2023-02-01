@@ -1,6 +1,7 @@
 """
 This module provides central location for all genomics_mappings
 """
+from rdr_service.genomic_enums import GenomicReportState
 
 genome_type_to_aw1_aw2_file_prefix = {
     "aou_array": "GEN",
@@ -175,11 +176,11 @@ wgs_file_types_attributes = ({'file_path_attribute': 'hfVcfPath',
                              {'file_path_attribute': 'gvcfPath',
                               'file_received_attribute': 'gvcfReceived',
                               'file_type': 'hard-filtered.gvcf.gz',
-                              'required': False},
+                              'required': True},
                              {'file_path_attribute': 'gvcfMd5Path',
                               'file_received_attribute': 'gvcfMd5Received',
                               'file_type': 'hard-filtered.gvcf.gz.md5sum',
-                              'required': False}
+                              'required': True}
                              )
 
 array_file_types_attributes = ({'file_path_attribute': 'idatRedPath',
@@ -234,4 +235,75 @@ informing_loop_event_mappings = {
     'hdr.informing_loop_decision.no': 'hdr.informing_loop.screen10_no',
     'hdr.informing_loop_decision.yes': 'hdr.informing_loop.screen10_yes',
     'hdr.informing_loop_decision.maybe_later': 'hdr.informing_loop.screen10_maybe_later'
+}
+
+cvl_result_reconciliation_modules = {
+    "hdr": "hdr_v1",
+    "pgx": "pgx_v1"
+}
+
+message_broker_report_ready_event_state_mappings = {
+    "pgx.result_ready": GenomicReportState.PGX_RPT_READY,
+    "hdr.result_ready.informative": GenomicReportState.HDR_RPT_POSITIVE,
+    "hdr.result_ready.uninformative": GenomicReportState.HDR_RPT_UNINFORMATIVE
+}
+
+message_broker_report_viewed_event_state_mappings = [
+    "hdr.opened_at",
+    "pgx.opened_at"
+]
+
+genome_center_datafile_prefix_map = {
+   'bi': {
+       'cram': 'wgs_sample_raw_data/crams_crais',
+       'cram.crai': 'wgs_sample_raw_data/crams_crais',
+       'cram.md5sum': 'wgs_sample_raw_data/crams_crais',
+       'hard-filtered.vcf.gz': 'wgs_sample_raw_data/ss_vcf_clinical',
+       'hard-filtered.vcf.gz.md5sum': 'wgs_sample_raw_data/ss_vcf_clinical',
+       'hard-filtered.vcf.gz.tbi': 'wgs_sample_raw_data/ss_vcf_clinical',
+       'hard-filtered.gvcf.gz': 'wgs_sample_raw_data/ss_vcf_research',
+       'hard-filtered.gvcf.gz.md5sum': 'wgs_sample_raw_data/ss_vcf_research',
+
+   },
+   'uw': {
+       'cram': 'Wgs_sample_raw_data/CRAMs_CRAIs',
+       'cram.crai': 'Wgs_sample_raw_data/CRAMs_CRAIs',
+       'cram.md5sum': 'Wgs_sample_raw_data/CRAMs_CRAIs',
+       'hard-filtered.vcf.gz': 'Wgs_sample_raw_data/SS_VCF_clinical',
+       'hard-filtered.vcf.gz.md5sum': 'Wgs_sample_raw_data/SS_VCF_clinical',
+       'hard-filtered.vcf.gz.tbi': 'Wgs_sample_raw_data/SS_VCF_clinical',
+       'hard-filtered.gvcf.gz': 'Wgs_sample_raw_data/SS_VCF_research',
+       'hard-filtered.gvcf.gz.md5sum': 'Wgs_sample_raw_data/SS_VCF_research'
+   },
+   'bcm': {
+       'cram': 'Wgs_sample_raw_data/CRAMs_CRAIs',
+       'cram.crai': 'Wgs_sample_raw_data/CRAMs_CRAIs',
+       'cram.md5sum': 'Wgs_sample_raw_data/CRAMs_CRAIs',
+       'hard-filtered.vcf.gz': 'Wgs_sample_raw_data/SS_VCF_clinical',
+       'hard-filtered.vcf.gz.md5sum': 'Wgs_sample_raw_data/SS_VCF_clinical',
+       'hard-filtered.vcf.gz.tbi': 'Wgs_sample_raw_data/SS_VCF_clinical',
+       'hard-filtered.gvcf.gz': 'Wgs_sample_raw_data/SS_VCF_research',
+       'hard-filtered.gvcf.gz.md5sum': 'Wgs_sample_raw_data/SS_VCF_research'
+   },
+   'rdr': {
+       'cram': 'Wgs_sample_raw_data/CRAMs_CRAIs',
+       'cram.crai': 'Wgs_sample_raw_data/CRAMs_CRAIs',
+       'cram.md5sum': 'Wgs_sample_raw_data/CRAMs_CRAIs',
+       'hard-filtered.vcf.gz': 'Wgs_sample_raw_data/SS_VCF_clinical',
+       'hard-filtered.vcf.gz.md5sum': 'Wgs_sample_raw_data/SS_VCF_clinical',
+       'hard-filtered.vcf.gz.tbi': 'Wgs_sample_raw_data/SS_VCF_clinical',
+       'hard-filtered.gvcf.gz': 'Wgs_sample_raw_data/SS_VCF_research',
+       'hard-filtered.gvcf.gz.md5sum': 'Wgs_sample_raw_data/SS_VCF_research'
+   }
+}
+
+wgs_metrics_manifest_mapping = {
+    'vcf_hf_path': 'hfVcfPath',
+    'vcf_hf_index_path': 'hfVcfTbiPath',
+    'vcf_hf_md5_path': 'hfVcfMd5Path',
+    'cram_path': 'cramPath',
+    'cram_md5_path': 'cramMd5Path',
+    'crai_path': 'craiPath',
+    'gvcf_path': 'gvcfPath',
+    'gvcf_md5_path': 'gvcfMd5Path'
 }

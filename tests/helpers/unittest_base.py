@@ -21,9 +21,7 @@ from tempfile import mkdtemp
 
 import faker
 
-from rdr_service import api_util
-from rdr_service import config
-from rdr_service import main
+from rdr_service import api_util, config, main, participant_enums
 from rdr_service.clock import FakeClock
 from rdr_service.code_constants import PPI_SYSTEM
 from rdr_service.concepts import Concept
@@ -55,7 +53,7 @@ class CodebookTestMixin:
     def setup_codes(values, code_type):
         code_dao = CodeDao()
         for value in values:
-            code_dao.insert(Code(system=PPI_SYSTEM, value=value, codeType=code_type, mapped=True))
+            code_dao.insert(Code(system=PPI_SYSTEM, value=value, display=value, codeType=code_type, mapped=True))
 
 
 class QuestionnaireTestMixin:
@@ -520,6 +518,11 @@ class BaseTestCase(unittest.TestCase, QuestionnaireTestMixin, CodebookTestMixin)
 
             self.session = database_factory.get_database().make_session()
             self.data_generator = DataGenerator(self.session, self.fake)
+        else:
+            # Some side effects of common code (like auth_required) use the database.
+            database_patch = mock.patch('rdr_service.dao.database_factory.get_database')
+            database_patch.start()
+            self.addCleanup(database_patch.stop)
 
     def tearDown(self):
         super(BaseTestCase, self).tearDown()
@@ -613,6 +616,10 @@ class BaseTestCase(unittest.TestCase, QuestionnaireTestMixin, CodebookTestMixin)
         summary.firstName = self.fake.first_name()
         summary.lastName = self.fake.last_name()
         summary.email = self.fake.email()
+        summary.enrollmentStatus = participant_enums.EnrollmentStatus.MEMBER
+        summary.enrollmentStatusV3_0 = participant_enums.EnrollmentStatusV30.PARTICIPANT_PLUS_EHR
+        summary.enrollmentStatusV3_1 = participant_enums.EnrollmentStatusV31.PARTICIPANT_PLUS_EHR
+
         return summary
 
     def create_participant(self, provider_link=None):

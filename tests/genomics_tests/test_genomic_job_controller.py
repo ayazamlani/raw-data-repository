@@ -1,17 +1,27 @@
 import datetime
+import json
+
+from dateutil import parser
 import mock
 
 from rdr_service import clock, config
 from rdr_service.api_util import open_cloud_file
 from rdr_service.clock import FakeClock
+from rdr_service.dao.database_utils import format_datetime
 from rdr_service.dao.genomics_dao import GenomicGcDataFileDao, GenomicGCValidationMetricsDao, GenomicIncidentDao, \
-    GenomicInformingLoopDao, GenomicResultViewedDao, GenomicSetMemberDao, UserEventMetricsDao, GenomicJobRunDao
+    GenomicSetMemberDao, UserEventMetricsDao, GenomicJobRunDao, GenomicResultWithdrawalsDao, \
+    GenomicMemberReportStateDao, GenomicAppointmentEventMetricsDao, GenomicAppointmentEventDao, GenomicResultViewedDao, \
+    GenomicInformingLoopDao, GenomicAppointmentEventNotifiedDao, GenomicDefaultBaseDao
 from rdr_service.dao.message_broker_dao import MessageBrokenEventDataDao
 from rdr_service.genomic_enums import GenomicIncidentCode, GenomicJob, GenomicWorkflowState, GenomicSubProcessResult, \
-    GenomicSubProcessStatus, GenomicManifestTypes, GenomicQcStatus
+    GenomicSubProcessStatus, GenomicManifestTypes, GenomicQcStatus, GenomicReportState
 from rdr_service.genomic.genomic_job_components import GenomicFileIngester
 from rdr_service.genomic.genomic_job_controller import GenomicJobController
-from rdr_service.model.genomics import GenomicGcDataFile, GenomicIncident, GenomicSetMember, GenomicGCValidationMetrics
+from rdr_service.model.genomics import GenomicGcDataFile, GenomicIncident, GenomicSetMember, GenomicGCValidationMetrics,\
+    GenomicGCROutreachEscalationNotified
+from rdr_service.offline import genomic_pipeline, genomic_cvl_pipeline
+from rdr_service.participant_enums import WithdrawalStatus
+from tests import test_data
 from tests.genomics_tests.test_genomic_pipeline import create_ingestion_test_file
 from tests.helpers.unittest_base import BaseTestCase
 
@@ -22,12 +32,13 @@ class GenomicJobControllerTest(BaseTestCase):
         self.data_file_dao = GenomicGcDataFileDao()
         self.event_data_dao = MessageBrokenEventDataDao()
         self.incident_dao = GenomicIncidentDao()
-        self.informing_loop_dao = GenomicInformingLoopDao()
-        self.result_viewed_dao = GenomicResultViewedDao()
         self.member_dao = GenomicSetMemberDao()
         self.metrics_dao = GenomicGCValidationMetricsDao()
         self.user_event_metrics_dao = UserEventMetricsDao()
         self.job_run_dao = GenomicJobRunDao()
+        self.report_state_dao = GenomicMemberReportStateDao()
+        self.appointment_event_dao = GenomicAppointmentEventDao()
+        self.appointment_metrics_dao = GenomicAppointmentEventMetricsDao()
 
     def test_incident_with_long_message(self):
         """Make sure the length of incident messages doesn't cause issues when recording them"""
@@ -97,19 +108,15 @@ class GenomicJobControllerTest(BaseTestCase):
 
         metrics = self.metrics_dao.get_metrics_by_member_id(gen_member.id)
 
-        self.assertIsNotNone(metrics.gvcfMd5Received)
         self.assertIsNotNone(metrics.gvcfMd5Path)
         self.assertEqual(metrics.gvcfMd5Path, full_path_md5)
-        self.assertEqual(metrics.gvcfMd5Received, 1)
 
         job_controller.ingest_data_files_into_gc_metrics(file_path, bucket_name)
 
         metrics = self.metrics_dao.get_metrics_by_member_id(gen_member.id)
 
-        self.assertIsNotNone(metrics.gvcfReceived)
         self.assertIsNotNone(metrics.gvcfPath)
         self.assertEqual(metrics.gvcfPath, full_path)
-        self.assertEqual(metrics.gvcfReceived, 1)
 
     def test_gvcf_files_ingestion_create_incident(self):
         bucket_name = "test_bucket"
@@ -251,334 +258,6 @@ class GenomicJobControllerTest(BaseTestCase):
             self.assertEqual(expected_objs[i].metadata, inserted_files[i].metadata)
             self.assertEqual(expected_objs[i].modified, inserted_files[i].modified)
 
-    def test_informing_loop_ingestion_message_broker(self):
-        loop_decision = 'informing_loop_decision'
-        loop_started = 'informing_loop_started'
-        # https://docs.google.com/document/d/1E1tNSi1mWwhBSCs9Syprbzl5E0SH3c_9oLduG1mzlcY/edit#heading=h.2m73apfm9irj
-        loop_module_types = ['gem', 'hdr', 'pgx']
-
-        gen_set = self.data_generator.create_database_genomic_set(
-            genomicSetName=".",
-            genomicSetCriteria=".",
-            genomicSetVersion=1
-        )
-
-        participant = self.data_generator.create_database_participant()
-        sample_id = '22222222'
-
-        self.data_generator.create_database_genomic_set_member(
-            genomicSetId=gen_set.id,
-            sampleId=sample_id,
-            participantId=participant.participantId,
-            biobankId="1",
-            genomeType="aou_array",
-            genomicWorkflowState=GenomicWorkflowState.AW0
-        )
-
-        # gem array
-        message_broker_record = self.data_generator.create_database_message_broker_record(
-            participantId=participant.participantId,
-            eventType=loop_decision,
-            eventAuthoredTime=clock.CLOCK.now(),
-            messageOrigin='example@example.com',
-            requestBody={'module_type': loop_module_types[0], 'decision_value': 'yes'},
-            requestTime=clock.CLOCK.now(),
-            responseError='',
-            responseCode='200',
-            responseTime=clock.CLOCK.now()
-        )
-
-        for key, value in message_broker_record.requestBody.items():
-            self.data_generator.create_database_message_broker_event_data(
-                participantId=message_broker_record.participantId,
-                messageRecordId=message_broker_record.id,
-                eventType=message_broker_record.eventType,
-                eventAuthoredTime=message_broker_record.eventAuthoredTime,
-                fieldName=key,
-                valueString=value
-            )
-
-        with GenomicJobController(GenomicJob.INGEST_INFORMING_LOOP) as controller:
-            controller.ingest_records_from_message_broker_data(
-                message_record_id=message_broker_record.id,
-                event_type=loop_decision
-            )
-
-        decision_genomic_record = self.informing_loop_dao.get(1)
-
-        self.assertIsNotNone(decision_genomic_record)
-        self.assertIsNotNone(decision_genomic_record.event_type)
-        self.assertIsNotNone(decision_genomic_record.module_type)
-        self.assertIsNotNone(decision_genomic_record.decision_value)
-
-        self.assertEqual(decision_genomic_record.message_record_id, message_broker_record.id)
-        self.assertEqual(decision_genomic_record.participant_id, message_broker_record.participantId)
-        self.assertEqual(decision_genomic_record.event_type, loop_decision)
-        self.assertTrue(decision_genomic_record.module_type == 'gem')
-        self.assertEqual(decision_genomic_record.decision_value, 'yes')
-        self.assertEqual(decision_genomic_record.sample_id, sample_id)
-
-        message_broker_record_two = self.data_generator.create_database_message_broker_record(
-            participantId=participant.participantId,
-            eventType=loop_started,
-            eventAuthoredTime=clock.CLOCK.now(),
-            messageOrigin='example@example.com',
-            requestBody={'module_type': loop_module_types[0]},
-            requestTime=clock.CLOCK.now(),
-            responseError='',
-            responseCode='200',
-            responseTime=clock.CLOCK.now()
-        )
-
-        for key, value in message_broker_record_two.requestBody.items():
-            self.data_generator.create_database_message_broker_event_data(
-                participantId=message_broker_record_two.participantId,
-                messageRecordId=message_broker_record_two.id,
-                eventType=message_broker_record_two.eventType,
-                eventAuthoredTime=message_broker_record_two.eventAuthoredTime,
-                fieldName=key,
-                valueString=value
-            )
-
-        with GenomicJobController(GenomicJob.INGEST_INFORMING_LOOP) as controller:
-            controller.ingest_records_from_message_broker_data(
-                message_record_id=message_broker_record_two.id,
-                event_type=loop_started
-            )
-
-        started_genomic_record = self.informing_loop_dao.get(2)
-
-        self.assertIsNotNone(started_genomic_record)
-        self.assertIsNotNone(started_genomic_record.event_type)
-        self.assertIsNotNone(started_genomic_record.module_type)
-        self.assertIsNone(started_genomic_record.decision_value)
-
-        self.assertEqual(started_genomic_record.message_record_id, message_broker_record_two.id)
-        self.assertEqual(started_genomic_record.participant_id, message_broker_record_two.participantId)
-        self.assertEqual(started_genomic_record.event_type, loop_started)
-        self.assertEqual(started_genomic_record.module_type, loop_module_types[0])
-        self.assertEqual(decision_genomic_record.sample_id, sample_id)
-
-        sample_id = '22333333'
-
-        self.data_generator.create_database_genomic_set_member(
-            genomicSetId=gen_set.id,
-            sampleId=sample_id,
-            participantId=participant.participantId,
-            biobankId="2",
-            genomeType="aou_wgs",
-            genomicWorkflowState=GenomicWorkflowState.AW0
-        )
-
-        # hdr wgs
-        message_broker_record_three = self.data_generator.create_database_message_broker_record(
-            participantId=participant.participantId,
-            eventType=loop_decision,
-            eventAuthoredTime=clock.CLOCK.now(),
-            messageOrigin='example@example.com',
-            requestBody={'module_type': loop_module_types[1], 'decision_value': 'yes'},
-            requestTime=clock.CLOCK.now(),
-            responseError='',
-            responseCode='200',
-            responseTime=clock.CLOCK.now()
-        )
-
-        for key, value in message_broker_record_three.requestBody.items():
-            self.data_generator.create_database_message_broker_event_data(
-                participantId=message_broker_record_three.participantId,
-                messageRecordId=message_broker_record_three.id,
-                eventType=message_broker_record_three.eventType,
-                eventAuthoredTime=message_broker_record_three.eventAuthoredTime,
-                fieldName=key,
-                valueString=value
-            )
-
-        with GenomicJobController(GenomicJob.INGEST_INFORMING_LOOP) as controller:
-            controller.ingest_records_from_message_broker_data(
-                message_record_id=message_broker_record_three.id,
-                event_type=loop_decision
-            )
-
-        decision_genomic_record = self.informing_loop_dao.get(3)
-
-        self.assertIsNotNone(decision_genomic_record)
-        self.assertIsNotNone(decision_genomic_record.event_type)
-        self.assertIsNotNone(decision_genomic_record.module_type)
-        self.assertIsNotNone(decision_genomic_record.decision_value)
-
-        self.assertEqual(decision_genomic_record.message_record_id, message_broker_record_three.id)
-        self.assertEqual(decision_genomic_record.participant_id, message_broker_record_three.participantId)
-        self.assertEqual(decision_genomic_record.event_type, loop_decision)
-        self.assertTrue(decision_genomic_record.module_type == 'hdr')
-        self.assertEqual(decision_genomic_record.decision_value, 'yes')
-        self.assertEqual(decision_genomic_record.sample_id, sample_id)
-
-    def test_result_viewed_ingestion_message_broker(self):
-        event_type = 'result_viewed'
-        participant = self.data_generator.create_database_participant()
-        # https://docs.google.com/document/d/1E1tNSi1mWwhBSCs9Syprbzl5E0SH3c_9oLduG1mzlcY/edit#heading=h.dtikttz25h22
-        result_module_types = ['gem', 'hdr_v1', 'pgx_v1']
-
-        gen_set = self.data_generator.create_database_genomic_set(
-            genomicSetName=".",
-            genomicSetCriteria=".",
-            genomicSetVersion=1
-        )
-
-        sample_id = '2222222'
-
-        self.data_generator.create_database_genomic_set_member(
-            genomicSetId=gen_set.id,
-            sampleId=sample_id,
-            participantId=participant.participantId,
-            biobankId="1",
-            genomeType="aou_array",
-            genomicWorkflowState=GenomicWorkflowState.AW0
-        )
-
-        message_broker_record = self.data_generator.create_database_message_broker_record(
-            participantId=participant.participantId,
-            eventType=event_type,
-            eventAuthoredTime=clock.CLOCK.now(),
-            messageOrigin='example@example.com',
-            requestBody={'result_type': result_module_types[0]},
-            requestTime=clock.CLOCK.now(),
-            responseError='',
-            responseCode='200',
-            responseTime=clock.CLOCK.now()
-        )
-
-        for key, value in message_broker_record.requestBody.items():
-            self.data_generator.create_database_message_broker_event_data(
-                participantId=message_broker_record.participantId,
-                messageRecordId=message_broker_record.id,
-                eventType=message_broker_record.eventType,
-                eventAuthoredTime=message_broker_record.eventAuthoredTime,
-                fieldName=key,
-                valueString=value
-            )
-
-        with GenomicJobController(GenomicJob.INGEST_RESULT_VIEWED) as controller:
-            controller.ingest_records_from_message_broker_data(
-                message_record_id=message_broker_record.id,
-                event_type=event_type
-            )
-
-        result_viewed_genomic_record = self.result_viewed_dao.get_all()
-
-        self.assertIsNotNone(result_viewed_genomic_record)
-        self.assertEqual(len(result_viewed_genomic_record), 1)
-
-        result_viewed_genomic_record = result_viewed_genomic_record[0]
-
-        self.assertIsNotNone(result_viewed_genomic_record.event_type)
-        self.assertIsNotNone(result_viewed_genomic_record.module_type)
-
-        self.assertEqual(result_viewed_genomic_record.message_record_id, message_broker_record.id)
-        self.assertEqual(result_viewed_genomic_record.participant_id, message_broker_record.participantId)
-        self.assertEqual(result_viewed_genomic_record.event_type, event_type)
-        self.assertTrue(result_viewed_genomic_record.module_type == 'gem')
-        self.assertEqual(result_viewed_genomic_record.sample_id, sample_id)
-
-        self.assertEqual(result_viewed_genomic_record.first_viewed, message_broker_record.eventAuthoredTime)
-        self.assertEqual(result_viewed_genomic_record.last_viewed,  message_broker_record.eventAuthoredTime)
-
-        message_broker_record_two = self.data_generator.create_database_message_broker_record(
-            participantId=participant.participantId,
-            eventType=event_type,
-            eventAuthoredTime=clock.CLOCK.now() + datetime.timedelta(days=1),
-            messageOrigin='example@example.com',
-            requestBody={'result_type': result_viewed_genomic_record.module_type},
-            requestTime=clock.CLOCK.now(),
-            responseError='',
-            responseCode='200',
-            responseTime=clock.CLOCK.now()
-        )
-
-        for key, value in message_broker_record_two.requestBody.items():
-            self.data_generator.create_database_message_broker_event_data(
-                participantId=message_broker_record_two.participantId,
-                messageRecordId=message_broker_record_two.id,
-                eventType=message_broker_record_two.eventType,
-                eventAuthoredTime=message_broker_record_two.eventAuthoredTime,
-                fieldName=key,
-                valueString=value
-            )
-
-        with GenomicJobController(GenomicJob.INGEST_RESULT_VIEWED) as controller:
-            controller.ingest_records_from_message_broker_data(
-                message_record_id=message_broker_record_two.id,
-                event_type=event_type
-            )
-
-        result_viewed_genomic_record = self.result_viewed_dao.get_all()
-
-        self.assertIsNotNone(result_viewed_genomic_record)
-        self.assertEqual(len(result_viewed_genomic_record), 1)
-
-        result_viewed_genomic_record = result_viewed_genomic_record[0]
-
-        self.assertEqual(result_viewed_genomic_record.first_viewed, message_broker_record.eventAuthoredTime)
-
-        # check updated record has the last viewed time
-        self.assertEqual(result_viewed_genomic_record.last_viewed, message_broker_record_two.eventAuthoredTime)
-        self.assertEqual(result_viewed_genomic_record.message_record_id, message_broker_record.id)
-
-        sample_id = '223333'
-
-        self.data_generator.create_database_genomic_set_member(
-            genomicSetId=gen_set.id,
-            sampleId=sample_id,
-            participantId=participant.participantId,
-            biobankId="2",
-            genomeType="aou_wgs",
-            genomicWorkflowState=GenomicWorkflowState.AW0
-        )
-
-        message_broker_record_two = self.data_generator.create_database_message_broker_record(
-            participantId=participant.participantId,
-            eventType=event_type,
-            eventAuthoredTime=clock.CLOCK.now(),
-            messageOrigin='example@example.com',
-            requestBody={'result_type': result_module_types[1]},
-            requestTime=clock.CLOCK.now(),
-            responseError='',
-            responseCode='200',
-            responseTime=clock.CLOCK.now()
-        )
-
-        for key, value in message_broker_record_two.requestBody.items():
-            self.data_generator.create_database_message_broker_event_data(
-                participantId=message_broker_record_two.participantId,
-                messageRecordId=message_broker_record_two.id,
-                eventType=message_broker_record_two.eventType,
-                eventAuthoredTime=message_broker_record_two.eventAuthoredTime,
-                fieldName=key,
-                valueString=value
-            )
-
-        with GenomicJobController(GenomicJob.INGEST_RESULT_VIEWED) as controller:
-            controller.ingest_records_from_message_broker_data(
-                message_record_id=message_broker_record_two.id,
-                event_type=event_type
-            )
-
-        result_viewed_genomic_record = self.result_viewed_dao.get(2)
-
-        self.assertIsNotNone(result_viewed_genomic_record)
-
-        self.assertIsNotNone(result_viewed_genomic_record.event_type)
-        self.assertIsNotNone(result_viewed_genomic_record.module_type)
-
-        self.assertEqual(result_viewed_genomic_record.message_record_id, message_broker_record_two.id)
-        self.assertEqual(result_viewed_genomic_record.participant_id, message_broker_record_two.participantId)
-        self.assertEqual(result_viewed_genomic_record.event_type, event_type)
-        self.assertTrue(result_viewed_genomic_record.module_type == 'hdr_v1')
-        self.assertEqual(result_viewed_genomic_record.sample_id, sample_id)
-
-        self.assertEqual(result_viewed_genomic_record.first_viewed, message_broker_record_two.eventAuthoredTime)
-        self.assertEqual(result_viewed_genomic_record.last_viewed, message_broker_record_two.eventAuthoredTime)
-
     def test_updating_members_blocklists(self):
 
         gen_set = self.data_generator.create_database_genomic_set(
@@ -587,15 +266,18 @@ class GenomicJobControllerTest(BaseTestCase):
             genomicSetVersion=1
         )
 
+        ids_should_be_updated = []
         # for just created and wf state query and MATCHES criteria
         for i in range(4):
-            self.data_generator.create_database_genomic_set_member(
-                genomicSetId=gen_set.id,
-                biobankId="100153482",
-                sampleId="21042005280",
-                genomeType='test_investigation_one' if i & 2 != 0 else 'aou_wgs',
-                genomicWorkflowState=GenomicWorkflowState.AW0,
-                ai_an='Y' if i & 2 == 0 else 'N'
+            ids_should_be_updated.append(
+                self.data_generator.create_database_genomic_set_member(
+                    genomicSetId=gen_set.id,
+                    biobankId="100153482",
+                    sampleId="21042005280",
+                    genomeType='test_investigation_one' if i & 2 != 0 else 'aou_wgs',
+                    genomicWorkflowState=GenomicWorkflowState.AW0,
+                    ai_an='Y' if i & 2 == 0 else 'N'
+                ).id
             )
 
         # for just created and wf state query and DOES NOT MATCH criteria
@@ -614,6 +296,9 @@ class GenomicJobControllerTest(BaseTestCase):
 
         # current config json in base_config.json
         created_members = self.member_dao.get_all()
+
+        blocklisted = list(filter(lambda x: x.blockResults == 1 or x.blockResearch == 1, created_members))
+        self.assertTrue(ids_should_be_updated.sort() == [obj.id for obj in blocklisted].sort())
 
         # should be RESEARCH blocked
         self.assertTrue(all(
@@ -827,6 +512,46 @@ class GenomicJobControllerTest(BaseTestCase):
                     decision_value='maybe_later',
                     event_authored_time=clock.CLOCK.now()
                 )
+
+                self.data_generator.create_database_genomic_cvl_past_due(
+                    cvl_site_id='co',
+                    email_notification_sent=0,
+                    sample_id='sample_test',
+                    results_type='hdr',
+                    genomic_set_member_id=gen_member.id
+                )
+
+                self.data_generator.create_database_genomic_appointment(
+                    message_record_id=i,
+                    appointment_id=i,
+                    event_type='appointment_scheduled',
+                    module_type='hdr',
+                    participant_id=participant.participantId,
+                    event_authored_time=clock.CLOCK.now(),
+                    source='Color',
+                    appointment_timestamp=format_datetime(clock.CLOCK.now()),
+                    appointment_timezone='America/Los_Angeles',
+                    location='123 address st',
+                    contact_number='17348675309',
+                    language='en'
+                )
+
+                self.data_generator.create_database_genomic_member_report_state(
+                    genomic_set_member_id=gen_member.id,
+                    participant_id=participant.participantId,
+                    module='gem',
+                    genomic_report_state=GenomicReportState.GEM_RPT_READY,
+                    event_authored_time=clock.CLOCK.now()
+                )
+
+                self.data_generator.create_genomic_result_viewed(
+                    participant_id=participant.participantId,
+                    event_type='result_viewed',
+                    event_authored_time=clock.CLOCK.now(),
+                    module_type='gem',
+                    sample_id=gen_member.sampleId
+                )
+
         # gets new records that were created with last job run from above
         with GenomicJobController(GenomicJob.RECONCILE_PDR_DATA) as controller:
             controller.reconcile_pdr_data()
@@ -839,7 +564,12 @@ class GenomicJobControllerTest(BaseTestCase):
             'genomic_gc_validation_metrics',
             'genomic_manifest_file',
             'genomic_manifest_feedback',
-            'genomic_informing_loop'
+            'genomic_informing_loop',
+            'genomic_cvl_results_past_due',
+            'user_event_metrics',
+            'genomic_member_report_state',
+            'genomic_result_viewed',
+            'genomic_appointment_event'
         ]
 
         num_calls = len(affected_tables) + 1
@@ -1047,7 +777,13 @@ class GenomicJobControllerTest(BaseTestCase):
                 )
                 self.data_generator.create_database_biobank_order_identifier(
                     value=stored_sample.biobankOrderIdentifier,
-                    biobankOrderId=order.biobankOrderId
+                    biobankOrderId=order.biobankOrderId,
+                    system="1",
+                )
+                self.data_generator.create_database_biobank_order_identifier(
+                    value=stored_sample.biobankOrderIdentifier,
+                    biobankOrderId=order.biobankOrderId,
+                    system="2",
                 )
                 member = self.data_generator.create_database_genomic_set_member(
                     genomicSetId=gen_set.id,
@@ -1107,3 +843,735 @@ class GenomicJobControllerTest(BaseTestCase):
         members_for_ready_loop = self.member_dao.get_members_for_informing_loop_ready()
         self.assertEqual(len(members_for_ready_loop), 0)
 
+    @mock.patch('rdr_service.services.email_service.EmailService.send_email')
+    def test_getting_results_withdrawn(self, email_mock):
+        num_participants = 4
+        result_withdrawal_dao = GenomicResultWithdrawalsDao()
+
+        gen_set = self.data_generator.create_database_genomic_set(
+            genomicSetName=".",
+            genomicSetCriteria=".",
+            genomicSetVersion=1
+        )
+        gen_job_run = self.data_generator.create_database_genomic_job_run(
+            jobId=GenomicJob.AW1_MANIFEST,
+            startTime=clock.CLOCK.now(),
+            runResult=GenomicSubProcessResult.SUCCESS
+        )
+
+        pids = []
+        for num in range(num_participants):
+            summary = self.data_generator.create_database_participant_summary(
+                consentForStudyEnrollment=1,
+                consentForGenomicsROR=1,
+                withdrawalStatus=WithdrawalStatus.EARLY_OUT
+            )
+
+            self.data_generator.create_database_genomic_set_member(
+                genomicSetId=gen_set.id,
+                participantId=summary.participantId,
+                genomeType=config.GENOME_TYPE_ARRAY,
+                gemA1ManifestJobRunId=gen_job_run.id if num % 2 == 0 else None
+            )
+
+            self.data_generator.create_database_genomic_set_member(
+                genomicSetId=gen_set.id,
+                participantId=summary.participantId,
+                genomeType=config.GENOME_TYPE_WGS,
+                cvlW1ilHdrJobRunId=gen_job_run.id
+            )
+
+            pids.append(summary.participantId)
+
+        config.override_setting(config.RDR_GENOMICS_NOTIFICATION_EMAIL, 'email@test.com')
+
+        with GenomicJobController(GenomicJob.RESULTS_PIPELINE_WITHDRAWALS) as controller:
+            controller.check_results_withdrawals()
+
+        # mock checks should be two => 1 GEM 1 HEALTH
+        self.assertEqual(email_mock.call_count, 2)
+        call_args = email_mock.call_args_list
+
+        self.assertTrue(any('GEM' in call.args[0].subject for call in call_args))
+        self.assertTrue(any('HEALTH' in call.args[0].subject for call in call_args))
+
+        job_runs = self.job_run_dao.get_all()
+        current_job_run = list(filter(lambda x: x.jobId == GenomicJob.RESULTS_PIPELINE_WITHDRAWALS, job_runs))[0]
+        self.assertTrue(current_job_run.runResult == GenomicSubProcessResult.SUCCESS)
+
+        all_withdrawal_records = result_withdrawal_dao.get_all()
+
+        self.assertTrue(len(all_withdrawal_records) == len(pids))
+        self.assertTrue(all(obj.participant_id in pids for obj in all_withdrawal_records))
+
+        array_results = list(filter(lambda x: x.array_results == 1, all_withdrawal_records))
+
+        # should only be 2
+        self.assertTrue(len(array_results), 2)
+
+        cvl_results = list(filter(lambda x: x.cvl_results == 1, all_withdrawal_records))
+
+        # should be 4 for num of participants
+        self.assertTrue(len(cvl_results), num_participants)
+
+        with GenomicJobController(GenomicJob.RESULTS_PIPELINE_WITHDRAWALS) as controller:
+            controller.check_results_withdrawals()
+
+        # mock checks should still be two on account of no records
+        self.assertEqual(email_mock.call_count, 2)
+
+        job_runs = self.job_run_dao.get_all()
+        current_job_run = list(filter(lambda x: x.jobId == GenomicJob.RESULTS_PIPELINE_WITHDRAWALS, job_runs))[1]
+
+        self.assertTrue(current_job_run.runResult == GenomicSubProcessResult.NO_RESULTS)
+
+    def test_gem_results_to_report_state(self):
+        num_participants = 8
+
+        gen_set = self.data_generator.create_database_genomic_set(
+            genomicSetName=".",
+            genomicSetCriteria=".",
+            genomicSetVersion=1
+        )
+
+        gem_a2_job_run = self.data_generator.create_database_genomic_job_run(
+            jobId=GenomicJob.GEM_A2_MANIFEST,
+            startTime=clock.CLOCK.now(),
+            runResult=GenomicSubProcessResult.SUCCESS
+        )
+
+        pids_to_update, member_ids = [], []
+        for num in range(num_participants):
+            summary = self.data_generator.create_database_participant_summary(
+                consentForStudyEnrollment=1,
+                consentForGenomicsROR=1,
+                withdrawalStatus=WithdrawalStatus.EARLY_OUT
+            )
+
+            member = self.data_generator.create_database_genomic_set_member(
+                genomicSetId=gen_set.id,
+                participantId=summary.participantId,
+                genomeType=config.GENOME_TYPE_ARRAY
+            )
+
+            if num % 2 == 0:
+                member_ids.append(member.id)
+                pids_to_update.append(summary.participantId)
+
+        with GenomicJobController(GenomicJob.GEM_RESULT_REPORTS) as controller:
+            controller.gem_results_to_report_state()
+
+        current_job_runs = self.job_run_dao.get_all()
+        self.assertEqual(len(current_job_runs), 2)
+
+        current_job_run = list(filter(lambda x: x.jobId == GenomicJob.GEM_RESULT_REPORTS, current_job_runs))[0]
+        self.assertTrue(current_job_run.runResult == GenomicSubProcessResult.NO_RESULTS)
+
+        current_members = self.member_dao.get_all()
+
+        # 4 members updated correctly should return
+        for member in current_members:
+            if member.participantId in pids_to_update:
+                member.gemA2ManifestJobRunId = gem_a2_job_run.id
+                member.genomicWorkflowState = GenomicWorkflowState.GEM_RPT_READY
+                self.member_dao.update(member)
+
+        with GenomicJobController(GenomicJob.GEM_RESULT_REPORTS) as controller:
+            controller.gem_results_to_report_state()
+
+        current_job_runs = self.job_run_dao.get_all()
+        self.assertEqual(len(current_job_runs), 3)
+
+        current_job_run = list(filter(lambda x: x.jobId == GenomicJob.GEM_RESULT_REPORTS, current_job_runs))[1]
+        self.assertTrue(current_job_run.runResult == GenomicSubProcessResult.SUCCESS)
+
+        current_gem_report_states = self.report_state_dao.get_all()
+        self.assertEqual(len(current_gem_report_states), len(pids_to_update))
+        self.assertTrue(all(obj.event_type == 'result_ready' for obj in current_gem_report_states))
+        self.assertTrue(all(obj.event_authored_time is not None for obj in current_gem_report_states))
+        self.assertTrue(all(obj.module == 'gem' for obj in current_gem_report_states))
+        self.assertTrue(
+            all(obj.genomic_report_state == GenomicReportState.GEM_RPT_READY for obj in current_gem_report_states)
+        )
+        self.assertTrue(
+            all(obj.genomic_report_state_str == GenomicReportState.GEM_RPT_READY.name for obj in
+                current_gem_report_states)
+        )
+        self.assertTrue(
+            all(obj.genomic_set_member_id in member_ids for obj in
+                current_gem_report_states)
+        )
+
+        # 4 members inserted already should not return
+        with GenomicJobController(GenomicJob.GEM_RESULT_REPORTS) as controller:
+            controller.gem_results_to_report_state()
+
+        current_job_runs = self.job_run_dao.get_all()
+        self.assertEqual(len(current_job_runs), 4)
+
+        current_job_run = list(filter(lambda x: x.jobId == GenomicJob.GEM_RESULT_REPORTS, current_job_runs))[2]
+        self.assertTrue(current_job_run.runResult == GenomicSubProcessResult.NO_RESULTS)
+
+        self.clear_table_after_test('genomic_member_report_state')
+
+    def test_reconcile_informing_loop(self):
+        event_dao = UserEventMetricsDao()
+        event_dao.truncate()  # for test suite
+        il_dao = GenomicInformingLoopDao()
+
+        for pid in range(8):
+            self.data_generator.create_database_participant(participantId=1 + pid, biobankId=1 + pid)
+
+        # Set up initial job run ID
+        self.data_generator.create_database_genomic_job_run(
+            jobId=GenomicJob.METRICS_FILE_INGEST,
+            startTime=clock.CLOCK.now()
+        )
+
+        # create genomic set
+        self.data_generator.create_database_genomic_set(
+            genomicSetName='test',
+            genomicSetCriteria='.',
+            genomicSetVersion=1
+        )
+        # insert set members
+        for b in ["aou_array", "aou_wgs"]:
+            for i in range(1, 9):
+                self.data_generator.create_database_genomic_set_member(
+                    participantId=i,
+                    genomicSetId=1,
+                    biobankId=i,
+                    collectionTubeId=100 + i,
+                    sampleId=10 + i,
+                    genomeType=b,
+                )
+
+        # Set up ingested metrics data
+        events = ['gem.informing_loop.started',
+                  'gem.informing_loop.screen8_no',
+                  'gem.informing_loop.screen8_yes',
+                  'hdr.informing_loop.started',
+                  'gem.informing_loop.screen3',
+                  'pgx.informing_loop.screen8_no',
+                  'hdr.informing_loop.screen10_no']
+
+        for p in range(4):
+            for i in range(len(events)):
+                self.data_generator.create_database_genomic_user_event_metrics(
+                    created=clock.CLOCK.now(),
+                    modified=clock.CLOCK.now(),
+                    participant_id=p + 1,
+                    created_at=datetime.datetime(2021, 12, 29, 00) + datetime.timedelta(hours=i),
+                    event_name=events[i],
+                    run_id=1,
+                    ignore_flag=0,
+                )
+        # Set up informing loop from message broker records
+        decisions = [None, 'no', 'yes']
+        for p in range(3):
+            for i in range(2):
+                self.data_generator.create_database_genomic_informing_loop(
+                    message_record_id=i,
+                    event_type='informing_loop_started' if i == 0 else 'informing_loop_decision',
+                    module_type='gem',
+                    participant_id=p + 1,
+                    decision_value=decisions[i],
+                    sample_id=100 + p,
+                    event_authored_time=datetime.datetime(2021, 12, 29, 00) + datetime.timedelta(hours=i)
+                )
+
+        # Test for no message but yes user event
+        self.data_generator.create_database_genomic_user_event_metrics(
+            created=clock.CLOCK.now(),
+            modified=clock.CLOCK.now(),
+            participant_id=6,
+            created_at=datetime.datetime(2021, 12, 29, 00),
+            event_name='gem.informing_loop.screen8_yes',
+            run_id=1,
+            ignore_flag=0,
+        )
+
+        # Run reconcile job
+        genomic_pipeline.reconcile_informing_loop_responses()
+
+        # Test mismatched GEM data ingested correctly
+        pid_list = [1, 2, 3, 6]
+
+        new_il_values = il_dao.get_latest_il_for_pids(
+            pid_list=pid_list,
+            module="gem"
+        )
+
+        for value in new_il_values:
+            self.assertEqual("yes", value.decision_value)
+
+        pid_list = [1, 2, 3, 4]
+        for module in ["hdr", "pgx"]:
+            new_il_values = il_dao.get_latest_il_for_pids(
+                pid_list=pid_list,
+                module=module
+            )
+
+            for value in new_il_values:
+                self.assertEqual("no", value.decision_value)
+                self.assertIsNotNone(value.created_from_metric_id)
+
+    def test_reconcile_message_broker_results_ready(self):
+        # Create Test Participants' data
+        # create genomic set
+        self.data_generator.create_database_genomic_set(
+            genomicSetName='test',
+            genomicSetCriteria='.',
+            genomicSetVersion=1
+        )
+        # Set up initial job run ID
+        self.data_generator.create_database_genomic_job_run(
+            jobId=GenomicJob.METRICS_FILE_INGEST,
+            startTime=clock.CLOCK.now()
+        )
+
+        for pid in range(7):
+            self.data_generator.create_database_participant(participantId=1 + pid, biobankId=1 + pid)
+
+        # insert set members and event metrics records
+        for i in range(1, 6):
+            self.data_generator.create_database_genomic_set_member(
+                participantId=i,
+                genomicSetId=1,
+                biobankId=i,
+                collectionTubeId=100 + i,
+                sampleId=10 + i,
+                genomeType="aou_wgs",
+            )
+
+            # 3 PGX records
+            if i < 4:
+                self.data_generator.create_database_genomic_user_event_metrics(
+                    participant_id=i,
+                    created_at=datetime.datetime(2022, 10, 6, 00),
+                    event_name="pgx.result_ready",
+                    run_id=1,
+                )
+
+            # 1 HDR Positive
+            if i == 4:
+                self.data_generator.create_database_genomic_user_event_metrics(
+                    participant_id=i,
+                    created_at=datetime.datetime(2022, 10, 6, 00),
+                    event_name="hdr.result_ready.informative",
+                    run_id=1,
+                )
+
+            # 1 HDR uninformative
+            if i == 5:
+                self.data_generator.create_database_genomic_user_event_metrics(
+                    participant_id=i,
+                    created_at=datetime.datetime(2022, 10, 6, 00),
+                    event_name="hdr.result_ready.uninformative",
+                    run_id=1,
+                )
+
+        # Run job
+        genomic_cvl_pipeline.reconcile_message_broker_results_ready()
+
+        # Test correct data inserted
+        report_state_dao = GenomicMemberReportStateDao()
+        states = report_state_dao.get_all()
+
+        self.assertEqual(5, len(states))
+
+        pgx_records = [rec for rec in states if rec.module == "pgx_v1"]
+        hdr_record_uninf = [rec for rec in states
+                            if rec.genomic_report_state == GenomicReportState.HDR_RPT_UNINFORMATIVE][0]
+
+        hdr_record_pos = [rec for rec in states
+                          if rec.genomic_report_state == GenomicReportState.HDR_RPT_POSITIVE][0]
+
+        for pgx_record in pgx_records:
+            self.assertEqual(GenomicReportState.PGX_RPT_READY, pgx_record.genomic_report_state)
+            self.assertEqual("PGX_RPT_READY", pgx_record.genomic_report_state_str)
+            self.assertEqual(int(pgx_record.sample_id), pgx_record.participant_id + 10)
+            self.assertEqual("result_ready", pgx_record.event_type)
+            self.assertEqual(datetime.datetime(2022, 10, 6, 00), pgx_record.event_authored_time)
+            self.assertIsNotNone(pgx_record.created_from_metric_id)
+
+        self.assertEqual("HDR_RPT_UNINFORMATIVE", hdr_record_uninf.genomic_report_state_str)
+        self.assertEqual(int(hdr_record_uninf.sample_id), hdr_record_uninf.participant_id + 10)
+        self.assertEqual("result_ready", hdr_record_uninf.event_type)
+        self.assertEqual(datetime.datetime(2022, 10, 6, 00), hdr_record_uninf.event_authored_time)
+        self.assertIsNotNone(hdr_record_uninf.created_from_metric_id)
+
+        self.assertEqual("HDR_RPT_POSITIVE", hdr_record_pos.genomic_report_state_str)
+        self.assertEqual(int(hdr_record_pos.sample_id), hdr_record_pos.participant_id + 10)
+        self.assertEqual("result_ready", hdr_record_pos.event_type)
+        self.assertEqual(datetime.datetime(2022, 10, 6, 00), hdr_record_pos.event_authored_time)
+        self.assertIsNotNone(hdr_record_pos.created_from_metric_id)
+
+    def test_reconcile_message_broker_results_viewed(self):
+        # Create Test Participants' data
+        # create genomic set
+        self.data_generator.create_database_genomic_set(
+            genomicSetName='test',
+            genomicSetCriteria='.',
+            genomicSetVersion=1
+        )
+        # Set up initial job run ID
+        self.data_generator.create_database_genomic_job_run(
+            jobId=GenomicJob.METRICS_FILE_INGEST,
+            startTime=clock.CLOCK.now()
+        )
+
+        for pid in range(3):
+            self.data_generator.create_database_participant(participantId=1 + pid, biobankId=1 + pid)
+
+        # insert set members and event metrics records
+        for i in range(1, 3):
+            self.data_generator.create_database_genomic_set_member(
+                participantId=i,
+                genomicSetId=1,
+                biobankId=i,
+                collectionTubeId=100 + i,
+                sampleId=10 + i,
+                genomeType="aou_wgs",
+            )
+
+            # 1 PGX Viewed
+            if i == 1:
+                self.data_generator.create_database_genomic_user_event_metrics(
+                    participant_id=i,
+                    created_at=datetime.datetime(2022, 10, 6, 00),
+                    event_name="pgx.opened_at",
+                    run_id=1,
+                )
+
+            # 1 HDR Viewed
+            if i == 2:
+                self.data_generator.create_database_genomic_user_event_metrics(
+                    participant_id=i,
+                    created_at=datetime.datetime(2022, 10, 6, 00),
+                    event_name="hdr.opened_at",
+                    run_id=1,
+                )
+
+        genomic_cvl_pipeline.reconcile_message_broker_results_viewed()
+
+        # Test correct data inserted
+        result_viewed_dao = GenomicResultViewedDao()
+        results = result_viewed_dao.get_all()
+
+        self.assertEqual(2, len(results))
+
+        for record in results:
+            if record.participant_id == 1:
+                self.assertEqual("pgx_v1", record.module_type)
+            else:
+                self.assertEqual("hdr_v1", record.module_type)
+            self.assertEqual(int(record.sample_id), record.participant_id + 10)
+            self.assertEqual("result_viewed", record.event_type)
+            self.assertEqual(datetime.datetime(2022, 10, 6, 00), record.first_viewed)
+            self.assertIsNotNone(record.created_from_metric_id)
+
+    def test_ingest_appointment_metrics_file(self):
+        test_file = 'Genomic-Metrics-File-Appointment-Events-Test.json'
+        bucket_name = 'test_bucket'
+        sub_folder = 'appointment_events'
+        pids = []
+
+        for _ in range(4):
+            summary = self.data_generator.create_database_participant_summary()
+            pids.append(summary.participantId)
+
+        test_file_path = f'{bucket_name}/{sub_folder}/{test_file}'
+
+        appointment_data = test_data.load_test_data_json(
+            "Genomic-Metrics-File-Appointment-Events-Test.json")
+        appointment_data_str = json.dumps(appointment_data, indent=4)
+
+        with open_cloud_file(test_file_path, mode='wb') as cloud_file:
+            cloud_file.write(appointment_data_str.encode("utf-8"))
+
+        with GenomicJobController(GenomicJob.APPOINTMENT_METRICS_FILE_INGEST) as controller:
+            controller.ingest_appointment_metrics_file(
+                file_path=test_file_path,
+            )
+
+        all_metrics = self.appointment_metrics_dao.get_all()
+
+        # should be 5 metric records for whats in json file
+        self.assertEqual(len(all_metrics), 5)
+        self.assertTrue(all((obj.participant_id in pids for obj in all_metrics)))
+        self.assertTrue(all((obj.file_path == test_file_path for obj in all_metrics)))
+        self.assertTrue(all((obj.appointment_event is not None for obj in all_metrics)))
+        self.assertTrue(all((obj.created is not None for obj in all_metrics)))
+        self.assertTrue(all((obj.modified is not None for obj in all_metrics)))
+        self.assertTrue(all((obj.module_type is not None for obj in all_metrics)))
+        self.assertTrue(all((obj.event_authored_time is not None for obj in all_metrics)))
+        self.assertTrue(all((obj.event_type is not None for obj in all_metrics)))
+
+        current_job_runs = self.job_run_dao.get_all()
+        self.assertEqual(len(current_job_runs), 1)
+
+        current_job_run = current_job_runs[0]
+        self.assertTrue(current_job_run.jobId == GenomicJob.APPOINTMENT_METRICS_FILE_INGEST)
+        self.assertTrue(current_job_run.runResult == GenomicSubProcessResult.SUCCESS)
+
+        self.clear_table_after_test('genomic_appointment_event_metrics')
+
+    def test_reconcile_appointments_with_metrics(self):
+        fake_date = parser.parse('2020-05-29T08:00:01-05:00')
+
+        for num in range(4):
+            summary = self.data_generator.create_database_participant_summary()
+
+            missing_json = {
+                "event": "appointment_updated",
+                "eventAuthoredTime": "2022-09-16T17:18:38Z",
+                "participantId": f'P{summary.participantId}',
+                "messageBody": {
+                    "module_type": "hdr",
+                    "appointment_timestamp": "2022-09-19T19:30:00+00:00",
+                    "id": 55,
+                    "appointment_timezone": "America/Los_Angeles",
+                    "location": "CA",
+                    "contact_number": "18043704252",
+                    "language": "en",
+                    "source": "Color"
+                }
+            }
+
+            if num % 2 == 0:
+                self.data_generator.create_database_genomic_appointment(
+                    message_record_id=num,
+                    appointment_id=num,
+                    event_type='appointment_scheduled',
+                    module_type='hdr',
+                    participant_id=summary.participantId,
+                    event_authored_time=fake_date,
+                    source='Color',
+                    appointment_timestamp=format_datetime(clock.CLOCK.now()),
+                    appointment_timezone='America/Los_Angeles',
+                    location='123 address st',
+                    contact_number='17348675309',
+                    language='en'
+                )
+
+            self.data_generator.create_database_genomic_appointment_metric(
+                participant_id=summary.participantId,
+                appointment_event=json.dumps(missing_json, indent=4) if num % 2 != 0 else 'foo',
+                file_path='test_file_path',
+                module_type='hdr',
+                event_authored_time=fake_date,
+                event_type='appointment_updated' if num % 2 != 0 else 'appointment_scheduled'
+            )
+
+        current_events = self.appointment_event_dao.get_all()
+        # should be 2 initial appointment events
+        self.assertEqual(len(current_events), 2)
+
+        current_metrics = self.appointment_metrics_dao.get_all()
+        # should be 4 initial appointment events
+        self.assertEqual(len(current_metrics), 4)
+        self.assertTrue(all(obj.reconcile_job_run_id is None for obj in current_metrics))
+
+        with GenomicJobController(GenomicJob.APPOINTMENT_METRICS_RECONCILE) as controller:
+            controller.reconcile_appointment_events_from_metrics()
+
+        job_run = self.job_run_dao.get_all()
+        self.assertEqual(len(job_run), 1)
+        self.assertTrue(job_run[0].jobId == GenomicJob.APPOINTMENT_METRICS_RECONCILE)
+
+        current_events = self.appointment_event_dao.get_all()
+        # should be 4  appointment events 2 initial + 2 added
+        self.assertEqual(len(current_events), 4)
+
+        scheduled = list(filter(lambda x: x.event_type == 'appointment_scheduled', current_events))
+        self.assertEqual(len(scheduled), 2)
+        self.assertTrue(all(obj.created_from_metric_id is None for obj in scheduled))
+
+        updated = list(filter(lambda x: x.event_type == 'appointment_updated', current_events))
+        self.assertEqual(len(updated), 2)
+        self.assertTrue(all(obj.created_from_metric_id is not None for obj in updated))
+
+        current_metrics = self.appointment_metrics_dao.get_all()
+        # should STILL be 4 initial appointment events
+        self.assertEqual(len(current_metrics), 4)
+        self.assertTrue(all(obj.reconcile_job_run_id is not None for obj in current_metrics))
+        self.assertTrue(all(obj.reconcile_job_run_id == job_run[0].id for obj in current_metrics))
+
+        self.clear_table_after_test('genomic_appointment_event_metrics')
+
+    @mock.patch('rdr_service.services.email_service.EmailService.send_email')
+    def test_check_appointments_gror_changed(self, email_mock):
+        fake_date = parser.parse("2022-09-01T13:43:23")
+        notified_dao = GenomicAppointmentEventNotifiedDao()
+        config.override_setting(config.GENOMIC_COLOR_PM_EMAIL, ['test@example.com'])
+        num_participants = 4
+        for num in range(num_participants):
+            gror = num if num > 1 else 1
+            summary = self.data_generator.create_database_participant_summary(
+                consentForStudyEnrollment=1,
+                consentForGenomicsROR=gror
+            )
+            self.data_generator.create_database_genomic_appointment(
+                message_record_id=num,
+                appointment_id=num,
+                event_type='appointment_scheduled',
+                module_type='hdr',
+                participant_id=summary.participantId,
+                event_authored_time=fake_date,
+                source='Color',
+                appointment_timestamp=format_datetime(clock.CLOCK.now()),
+                appointment_timezone='America/Los_Angeles',
+                location='123 address st',
+                contact_number='17348675309',
+                language='en'
+            )
+
+        changed_ppts = self.appointment_event_dao.get_appointments_gror_changed()
+        self.assertEqual(2, len(changed_ppts))
+        with GenomicJobController(GenomicJob.CHECK_APPOINTMENT_GROR_CHANGED) as controller:
+            controller.check_appointments_gror_changed()
+
+        self.assertEqual(email_mock.call_count, 1)
+        notified_appointments = notified_dao.get_all()
+        self.assertEqual(2, len(notified_appointments))
+
+        # test notified not returned by query
+        summary = self.data_generator.create_database_participant_summary(
+            consentForStudyEnrollment=1,
+            consentForGenomicsROR=2
+        )
+        self.data_generator.create_database_genomic_appointment(
+            message_record_id=5,
+            appointment_id=5,
+            event_type='appointment_scheduled',
+            module_type='hdr',
+            participant_id=summary.participantId,
+            event_authored_time=fake_date,
+            source='Color',
+            appointment_timestamp=format_datetime(clock.CLOCK.now()),
+            appointment_timezone='America/Los_Angeles',
+            location='123 address st',
+            contact_number='17348675309',
+            language='en'
+        )
+
+        changed_ppts = self.appointment_event_dao.get_appointments_gror_changed()
+        self.assertEqual(1, len(changed_ppts))
+
+    @mock.patch('rdr_service.services.email_service.EmailService.send_email')
+    def test_check_gcr_14day_escalation(self, email_mock):
+        fake_date = parser.parse("2022-09-01T13:43:23")
+        fake_date2 = parser.parse("2022-09-02T14:14:00")
+        fake_date3 = parser.parse("2022-09-03T15:15:00")
+        config.override_setting(config.GENOMIC_GCR_ESCALATION_EMAILS, ['test@example.com'])
+        self.data_generator.create_database_genomic_set(
+            genomicSetName='test',
+            genomicSetCriteria='.',
+            genomicSetVersion=1
+        )
+        pids = []
+        for _ in range(5):
+            summary = self.data_generator.create_database_participant_summary(
+                consentForStudyEnrollment=1,
+                consentForGenomicsROR=1
+            )
+            set_member = self.data_generator.create_database_genomic_set_member(
+                participantId=summary.participantId,
+                genomicSetId=1,
+                biobankId=1001,
+                collectionTubeId=100,
+                sampleId=10,
+                genomeType="aou_wgs",
+            )
+            self.data_generator.create_database_genomic_member_report_state(
+                participant_id=summary.participantId,
+                genomic_report_state=GenomicReportState.HDR_RPT_POSITIVE,
+                genomic_set_member_id=set_member.id,
+                module='hdr_v1',
+                event_authored_time=fake_date
+            )
+            pids.append(summary.participantId)
+
+        # Appointment scheduled in future: don't notify
+        self.data_generator.create_database_genomic_appointment(
+            message_record_id=101,
+            appointment_id=102,
+            event_type='appointment_scheduled',
+            module_type='hdr',
+            participant_id=pids[0],
+            event_authored_time=fake_date,
+            source='Color',
+            appointment_timestamp=format_datetime(clock.CLOCK.now()),
+            appointment_timezone='America/Los_Angeles',
+            location='123 address st',
+            contact_number='17348675309',
+            language='en'
+        )
+
+        # Appointment completed: don't notify
+        self.data_generator.create_database_genomic_appointment(
+            message_record_id=102,
+            appointment_id=103,
+            event_type='appointment_completed',
+            module_type='hdr',
+            participant_id=pids[1],
+            event_authored_time=fake_date,
+            source='Color',
+            appointment_timestamp=fake_date,
+            appointment_timezone='America/Los_Angeles',
+            location='123 address st',
+            contact_number='17348675309',
+            language='en'
+        )
+
+        # Appointment scheduled then canceled: notify
+        self.data_generator.create_database_genomic_appointment(
+            message_record_id=103,
+            appointment_id=104,
+            event_type='appointment_scheduled',
+            module_type='hdr',
+            participant_id=pids[2],
+            event_authored_time=fake_date2,
+            source='Color',
+            appointment_timestamp=format_datetime(clock.CLOCK.now()),
+            appointment_timezone='America/Los_Angeles',
+            location='123 address st',
+            contact_number='17348675309',
+            language='en'
+        )
+        self.data_generator.create_database_genomic_appointment(
+            message_record_id=104,
+            appointment_id=104,
+            event_type='appointment_cancelled',
+            module_type='hdr',
+            participant_id=pids[2],
+            event_authored_time=fake_date3,
+            source='Color',
+            appointment_timestamp=format_datetime(clock.CLOCK.now()),
+            appointment_timezone='America/Los_Angeles',
+            location='123 address st',
+            contact_number='17348675309',
+            language='en'
+        )
+
+        notified_dao = GenomicDefaultBaseDao(model_type=GenomicGCROutreachEscalationNotified)
+        notified_dao.insert_bulk([{
+            'participant_id': pids[4],
+            'created': clock.CLOCK.now(),
+            'modified': clock.CLOCK.now()
+        }])
+
+        with clock.FakeClock(parser.parse('2022-11-1T05:15:00')):
+            escalated_participants = self.report_state_dao.get_hdr_result_positive_no_appointment()
+            results = [pid[0] for pid in escalated_participants]
+        self.assertIn(pids[2], results)
+        self.assertIn(pids[3], results)
+        self.assertNotIn(pids[0], results)
+        self.assertNotIn(pids[1], results)
+        self.assertNotIn(pids[4], results)
+
+        with GenomicJobController(GenomicJob.CHECK_GCR_OUTREACH_ESCALATION) as controller:
+            controller.check_gcr_14day_escalation()
+
+        self.assertEqual(email_mock.call_count, 2)

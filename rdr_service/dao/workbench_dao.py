@@ -8,6 +8,9 @@ from sqlalchemy.orm import subqueryload, aliased
 from rdr_service.dao.base_dao import UpdatableDao
 from rdr_service import clock
 from datetime import datetime, timedelta
+from rdr_service.cloud_utils.gcp_cloud_tasks import GCPCloudTask
+from rdr_service.config import GAE_PROJECT
+from rdr_service.dao.bq_workbench_dao import rebuild_bq_wb_researchers
 from rdr_service.dao.metadata_dao import MetadataDao, WORKBENCH_LAST_SYNC_KEY
 from rdr_service.model.workbench_workspace import (
     WorkbenchWorkspaceApproved,
@@ -33,6 +36,7 @@ from rdr_service.participant_enums import WorkbenchWorkspaceStatus, WorkbenchWor
     WorkbenchResearcherAccessTierShortName, WorkbenchResearcherEthnicCategory, WorkbenchResearcherSexualOrientationV2, \
     WorkbenchResearcherGenderIdentity, WorkbenchResearcherYesNoPreferNot, WorkbenchResearcherSexAtBirthV2,\
     WorkbenchResearcherEducationV2
+from rdr_service.services.system_utils import list_chunks
 
 
 class WorkbenchWorkspaceDao(UpdatableDao):
@@ -938,7 +942,7 @@ class WorkbenchResearcherDao(UpdatableDao):
             if item.get("demographicSurveyV2") is not None:
                 survey = item.get("demographicSurveyV2")
                 current_year = clock.CLOCK.now().year
-                if current_year - int(survey.get("yearOfBirth")) > 125:
+                if survey.get("yearOfBirth") and current_year - int(survey.get("yearOfBirth")) > 125:
                     raise BadRequest(f"Invalid birth year: {survey.get('yearOfBirth')} more than 125 years ago")
                 ethnic_categories = []
                 if survey.get("ethnicCategories") is not None:
@@ -1150,6 +1154,7 @@ class WorkbenchResearcherDao(UpdatableDao):
     @staticmethod
     def _insert_history(session, researchers):
         session.flush()
+        hist_researchers = list()
         for researcher in researchers:
             history = WorkbenchResearcherHistory()
             for k, v in researcher:
@@ -1168,6 +1173,32 @@ class WorkbenchResearcherDao(UpdatableDao):
                 affiliations_history.append(affiliation_obj)
             history.workbenchInstitutionalAffiliations = affiliations_history
             session.add(history)
+            hist_researchers.append(history)
+        session.commit()
+
+        # Generate tasks to build PDR records.
+        if GAE_PROJECT == 'localhost':
+            rebuild_bq_wb_researchers(hist_researchers)
+        else:
+            researcher_ids = list()
+            affiliation_ids = list()
+            for obj in hist_researchers:
+                researcher_ids.append(obj.id)
+                if obj.workbenchInstitutionalAffiliations:
+                    for aff in obj.workbenchInstitutionalAffiliations:
+                        affiliation_ids.append(aff.id)
+
+            task = GCPCloudTask()
+            if researcher_ids:
+                for chunk in list_chunks(researcher_ids, chunk_size=250):
+                    payload = {'table': 'researcher', 'ids': chunk}
+                    task.execute('rebuild_research_workbench_table_records_task', payload=payload,
+                                   in_seconds=30, queue='resource-rebuild')
+            if affiliation_ids:
+                for chunk in list_chunks(affiliation_ids, chunk_size=250):
+                    payload = {'table': 'institutional_affiliations', 'ids': chunk}
+                    task.execute('rebuild_research_workbench_table_records_task', payload=payload,
+                                   in_seconds=30, queue='resource-rebuild')
 
     @staticmethod
     def get_researcher_by_user_id_with_session(session, user_id):
@@ -1199,7 +1230,7 @@ class WorkbenchResearcherDao(UpdatableDao):
                 'dsv2OrientationOther': survey.get('orientationOtherText'),
                 'dsv2SexAtBirth': WorkbenchResearcherSexAtBirthV2(survey.get('sexAtBirth', 'UNSET')),
                 'dsv2SexAtBirthOther': survey.get('sexAtBirthOtherText'),
-                'dsv2YearOfBirth': int(survey.get('yearOfBirth')),
+                'dsv2YearOfBirth': int(survey.get('yearOfBirth')) if survey.get('yearOfBirth') else None,
                 'dsv2YearOfBirthPreferNot': survey.get('yearOfBirthPreferNot'),
                 'dsv2DisabilityHearing': WorkbenchResearcherYesNoPreferNot(survey.get('disabilityHearing', 'UNSET')),
                 'dsv2DisabilitySeeing': WorkbenchResearcherYesNoPreferNot(survey.get('disabilitySeeing', 'UNSET')),
@@ -1211,6 +1242,7 @@ class WorkbenchResearcherDao(UpdatableDao):
                 'dsv2DisabilityOther': survey.get('disabilityOtherText'),
                 'dsv2Education': WorkbenchResearcherEducationV2(survey.get('education', 'UNSET')),
                 'dsv2Disadvantaged': WorkbenchResearcherYesNoPreferNot(survey.get('disadvantaged', 'UNSET')),
+                'dsv2SurveyComments': survey.get('surveyComments'),
             }
         else:
             survey_params = {
@@ -1240,6 +1272,7 @@ class WorkbenchResearcherDao(UpdatableDao):
                 'dsv2DisabilityOther': None,
                 'dsv2Education': WorkbenchResearcherEducationV2('UNSET'),
                 'dsv2Disadvantaged': WorkbenchResearcherYesNoPreferNot('UNSET'),
+                'dsv2SurveyComments': None,
             }
         return survey_params
 

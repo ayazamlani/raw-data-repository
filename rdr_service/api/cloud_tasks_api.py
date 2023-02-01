@@ -11,7 +11,7 @@ from rdr_service.dao.bq_code_dao import rebuild_bq_codebook_task
 from rdr_service.dao.bq_participant_summary_dao import bq_participant_summary_update_task
 from rdr_service.dao.bq_questionnaire_dao import bq_questionnaire_update_task
 from rdr_service.dao.bq_workbench_dao import bq_workspace_batch_update, bq_workspace_user_batch_update, \
-    bq_institutional_affiliations_batch_update, bq_researcher_batch_update
+    bq_institutional_affiliations_batch_update, bq_researcher_batch_update, bq_audit_batch_update
 from rdr_service.offline import retention_eligible_import
 from rdr_service.offline.requests_log_migrator import RequestsLogMigrator
 from rdr_service.offline.sync_consent_files import cloudstorage_copy_objects_task
@@ -22,6 +22,9 @@ from rdr_service.resource.generators.workbench import res_workspace_batch_update
 from rdr_service.resource.tasks import batch_rebuild_participants_task, batch_rebuild_retention_metrics_task, \
     batch_rebuild_consent_metrics_task, batch_rebuild_user_event_metrics_task, check_consent_errors_task
 from rdr_service.services.participant_data_validation import ParticipantDataValidation
+from rdr_service.services.slack_utils import SlackMessageHandler
+from rdr_service import config
+from rdr_service.config import RDR_SLACK_WEBHOOKS
 
 
 def log_task_headers():
@@ -162,6 +165,8 @@ class RebuildResearchWorkbenchTableRecordsApi(Resource):
         elif table == 'researcher':
             bq_researcher_batch_update(batch)
             res_researcher_batch_update(batch)
+        elif table == 'audit':
+            bq_audit_batch_update(batch)
 
         logging.info(f'Rebuild complete.')
         return '{"success": "true"}'
@@ -179,6 +184,30 @@ class ArchiveRequestLogApi(Resource):
         log_id = data.get('log_id')
 
         RequestsLogMigrator.archive_log(log_id)
+        return '{"success": "true"}'
+
+
+class PtscHealthDataTransferValidTaskApi(Resource):
+    """
+    Cloud Task endpoint: Ptsc Health Data Transfer Result
+    """
+    @task_auth_required
+    def post(self):
+        log_task_headers()
+        data = request.get_json(force=True)
+        logging.info(f'Ptsc Health Data Transfer Result: {data.get("attributes").get("eventType")}')
+        # possible event types: TRANSFER_OPERATION_SUCCESS, TRANSFER_OPERATION_FAILED, TRANSFER_OPERATION_ABORTED
+        event_type = data.get("attributes").get("eventType")
+        if event_type == 'TRANSFER_OPERATION_ABORTED':
+            slack_config = config.getSettingJson(RDR_SLACK_WEBHOOKS, {})
+            webhook_url = slack_config.get('rdr_ptsc_health_data_transfer_alerts')
+            slack_alert_helper = SlackMessageHandler(webhook_url=webhook_url)
+            logging.info('sending PTSC health data transfer error alert')
+            message_data = {
+                'text': f'PTSC health data transfer status: {event_type}, please check data transfer log for detail'}
+            slack_alert_helper.send_message_to_webhook(message_data=message_data)
+
+        logging.info('Complete.')
         return '{"success": "true"}'
 
 

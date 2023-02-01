@@ -40,7 +40,11 @@ GROR_CONSENT_QUESTION_CODE = "ResultsConsent_CheckDNA"
 COPE_CONSENT_QUESTION_CODE = "section_participation"
 WEAR_CONSENT_QUESTION_CODE = "resultsconsent_wear"
 PRIMARY_CONSENT_UPDATE_QUESTION_CODE = "Reconsent_ReviewConsentAgree"
-
+VA_EHR_RECONSENT_QUESTION_CODE = "vaehrreconsent_agree"
+VA_PRIMARY_RECONSENT_C1_C2_QUESTION = 'vaprimaryreconsent_c1_2_agree'
+VA_PRIMARY_RECONSENT_C3_QUESTION = 'vaprimaryreconsent_c3_agree'
+NON_VA_PRIMARY_RECONSENT_QUESTION = 'nonvaprimaryreconsent_agree'
+ETM_CONSENT_QUESTION_CODE = 'etm_consent'
 DATE_OF_BIRTH_QUESTION_CODE = "PIIBirthInformation_BirthDate"
 
 GENDER_IDENTITY_QUESTION_CODE = "Gender_GenderIdentity"
@@ -172,7 +176,6 @@ PERSONAL_MEDICAL_HISTORY_MODULE = "PersonalMedicalHistory"
 MEDICATIONS_MODULE = "MedicationsPPI"
 REMOTE_PM_MODULE = 'pm_height_weight'
 REMOTE_PM_UNIT = 'measurement_unit'
-# TODO: UPDATE THIS TO REAL CODEBOOK VALUES WHEN PRESENT
 HEALTHCARE_ACCESS_MODULE = "HealthcareAccess"
 # COVID Experience surveys:
 # The COPE module covers the May/June/July (2020) COPE Survey questionnaires
@@ -182,6 +185,10 @@ COPE_NOV_MODULE = 'cope_nov'
 COPE_DEC_MODULE = "cope_dec"
 COPE_FEB_MODULE = "cope_feb"
 GENETIC_ANCESTRY_MODULE = 'GeneticAncestry'
+LIFE_FUNCTIONING_SURVEY = 'lfs'
+PRIMARY_CONSENT_UPDATE_MODULE = 'PrimaryConsentUpdate'
+
+VA_EHR_RECONSENT = 'vaehrreconsent'
 
 # ConsentPII Questions
 RECEIVE_CARE_STATE = "ReceiveCare_PIIState"
@@ -192,6 +199,11 @@ TX_CARE_STATE = "PIIStateCare_TX"
 AK_CARE_STATE = "PIIStateCare_AK"
 MA_CARE_STATE = "PIIStateCare_MA"
 MI_CARE_STATE = "PIIStateCare_MI"
+OR_STATE = "PIIState_OR"
+TX_STATE = "PIIState_TX"
+AK_STATE = "PIIState_AK"
+MA_STATE = "PIIState_MA"
+MI_STATE = "PIIState_MI"
 
 # DVEHR ANSWERS
 DVEHRSHARING_CONSENT_CODE_YES = "DVEHRSharing_Yes"
@@ -210,6 +222,10 @@ APPLE_HEALTH_KIT_SHARING_MODULE = "participantintendstoshareapplehealthkit"
 APPLE_HEALTH_KIT_STOP_SHARING_MODULE = "participantintendstostopsharingapplehealthkit"
 FITBIT_SHARING_MODULE = "participantintendstosharefitbit"
 FITBIT_STOP_SHARING_MODULE = "participantintendstostopsharingfitbit"
+
+# General response answer codes
+AGREE_YES = "agree_yes"
+AGREE_NO = "agree_no"
 
 BIOBANK_TESTS = [
     "1ED10",
@@ -261,5 +277,14 @@ SENSITIVE_EHR_STATES = [
     TX_CARE_STATE,
     AK_CARE_STATE,
     MA_CARE_STATE,
-    MI_CARE_STATE
+    MI_CARE_STATE,
+    OR_STATE,
+    TX_STATE,
+    AK_STATE,
+    MA_STATE,
+    MI_STATE
 ]
+
+# Remote ID Verification Question Codes
+REMOTE_ID_VERIFIED_CODE = 'remote_identity_verified'
+REMOTE_ID_VERIFIED_ON_CODE = 'remote_identity_verified_on'

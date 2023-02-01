@@ -15,6 +15,7 @@ from rdr_service.dao.code_dao import CodeDao
 from rdr_service.dao.participant_summary_dao import ParticipantGenderAnswersDao, ParticipantRaceAnswersDao, \
     ParticipantSummaryDao
 from rdr_service.model.biobank_stored_sample import BiobankStoredSample
+from rdr_service.model.config_utils import from_client_biobank_id
 from rdr_service.dao.biobank_stored_sample_dao import BiobankStoredSampleDao
 from rdr_service.dao.questionnaire_dao import QuestionnaireDao
 from rdr_service.dao.questionnaire_response_dao import QuestionnaireResponseAnswerDao, QuestionnaireResponseDao
@@ -154,7 +155,6 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
         summary = self.send_get("Participant/{0}/Summary".format(participant_id))
         self.assertEqual(summary.get('baselineQuestionnairesFirstCompleteAuthored'), TIME_3.isoformat())
 
-
     def test_remote_pm_imperial_response(self):
         questionnaire_id = self.create_questionnaire("questionnaire3.json")
         questionnaire_id_1 = self.create_questionnaire("all_consents_questionnaire.json")
@@ -206,13 +206,13 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
         self._store_biobank_sample(participant_1, "2ED10", time=TIME_1)
         # Update participant summaries based on these changes
         # So it could trigger the participant_summary_dao.calculate_max_core_sample_time to compare the
-        # physicalMeasurementsFinalizedTime with other times to cover the bug scenario:
+        # clinicPhysicalMeasurementsFinalizedTime with other times to cover the bug scenario:
         # TypeError("can't compare offset-naive and offset-aware datetimes")
         ps_dao = ParticipantSummaryDao()
-        ps_dao.update_from_biobank_stored_samples()
+        ps_dao.update_from_biobank_stored_samples(biobank_ids=[from_client_biobank_id(participant_1['biobankId'])])
 
         summary = self.send_get("Participant/{0}/Summary".format(participant_id))
-        self.assertEqual(summary["physicalMeasurementsStatus"], 'UNSET')
+        self.assertEqual(summary["selfReportedPhysicalMeasurementsStatus"], 'UNSET')
         self.assertEqual(summary["enrollmentStatus"], 'CORE_MINUS_PM')
         remote_pm_questionnaire_id = self.create_questionnaire("remote_pm_questionnaire.json")
 
@@ -222,10 +222,8 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
             self.send_post(_questionnaire_response_url(participant_id), resource)
 
         summary = self.send_get("Participant/{0}/Summary".format(participant_id))
-        self.assertEqual(summary['physicalMeasurementsStatus'], 'COMPLETED')
-        self.assertEqual(summary['physicalMeasurementsCollectType'], 'SELF_REPORTED')
-        self.assertEqual(summary['physicalMeasurementsFinalizedTime'], '2022-06-01T18:23:57')
-        self.assertEqual(summary['physicalMeasurementsTime'], '2016-01-02T00:00:00')
+        self.assertEqual(summary['selfReportedPhysicalMeasurementsStatus'], 'COMPLETED')
+        self.assertEqual(summary['selfReportedPhysicalMeasurementsAuthored'], '2022-06-01T18:23:57')
         self.assertEqual(summary["enrollmentStatus"], 'FULL_PARTICIPANT')
 
         response = self.send_get("Participant/{0}/PhysicalMeasurements".format(participant_id))
@@ -264,7 +262,7 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
         with FakeClock(created):
             self.send_consent(participant_id, authored=authored_1)
         summary = self.send_get("Participant/{0}/Summary".format(participant_id))
-        self.assertEqual(summary["physicalMeasurementsStatus"], 'UNSET')
+        self.assertEqual(summary["selfReportedPhysicalMeasurementsStatus"], 'UNSET')
 
         remote_pm_questionnaire_id = self.create_questionnaire("remote_pm_questionnaire.json")
 
@@ -274,10 +272,8 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
             self.send_post(_questionnaire_response_url(participant_id), resource)
 
         summary = self.send_get("Participant/{0}/Summary".format(participant_id))
-        self.assertEqual(summary['physicalMeasurementsStatus'], 'COMPLETED')
-        self.assertEqual(summary['physicalMeasurementsCollectType'], 'SELF_REPORTED')
-        self.assertEqual(summary['physicalMeasurementsFinalizedTime'], '2022-06-01T18:26:08')
-        self.assertEqual(summary['physicalMeasurementsTime'], '2016-01-02T00:00:00')
+        self.assertEqual(summary['selfReportedPhysicalMeasurementsStatus'], 'COMPLETED')
+        self.assertEqual(summary['selfReportedPhysicalMeasurementsAuthored'], '2022-06-01T18:26:08')
 
         response = self.send_get("Participant/{0}/PhysicalMeasurements".format(participant_id))
         self.assertEqual(1, len(response["entry"]))
@@ -307,6 +303,33 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
                          )
         self.assertEqual(response["entry"][0]["resource"]["entry"][1]['resource']['effectiveDateTime'],
                          '2022-06-01T18:26:08')
+
+    def test_remote_pm_can_skip_questions(self):
+        self.data_generator.create_database_code(value='pmi_skip')
+        participant_id = to_client_participant_id(
+            self.data_generator.create_database_participant_summary().participantId
+        )
+        remote_pm_questionnaire_id = self.create_questionnaire("remote_pm_questionnaire.json")
+
+        resource = self._load_response_json("remote_pm_response_metric.json", remote_pm_questionnaire_id,
+                                            participant_id)
+        resource['group']['question'][1]['answer'] = [{
+            "valueCoding": {
+                "code": "PMI_Skip",
+                "system": "http://terminology.pmi-ops.org/CodeSystem/ppi"
+            }
+        }]
+        resource['group']['question'][2]['answer'] = [{
+            "valueCoding": {
+                "code": "PMI_Skip",
+                "system": "http://terminology.pmi-ops.org/CodeSystem/ppi"
+            }
+        }]
+        with FakeClock(TIME_2):
+            self.send_post(_questionnaire_response_url(participant_id), resource)
+
+        summary = self.send_get("Participant/{0}/Summary".format(participant_id))
+        self.assertEqual(summary['selfReportedPhysicalMeasurementsStatus'], 'COMPLETED')
 
     def test_ehr_consent_expired(self):
         participant_id = self.create_participant()
@@ -398,9 +421,8 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
         summary = self.send_get("Participant/{0}/Summary".format(participant_id))
         self.assertEqual(summary.get('consentForElectronicHealthRecordsAuthored'), '2020-03-20T00:00:00')
         self.assertEqual(summary.get('consentForElectronicHealthRecords'), 'SUBMITTED_NO_CONSENT')
-        # keep the same behaviour with the withdrawal participant for enrollmentStatusMemberTime
-        self.assertEqual(summary.get('enrollmentStatusMemberTime'), None)
-        self.assertEqual(summary.get('enrollmentStatus'), 'INTERESTED')
+        self.assertEqual(summary.get('enrollmentStatusMemberTime'), '2020-02-12T00:00:00')
+        self.assertEqual(summary.get('enrollmentStatus'), 'MEMBER')
         self.assertEqual(summary.get('ehrConsentExpireStatus'), 'EXPIRED')
         self.assertEqual(summary.get('ehrConsentExpireTime'), '2020-04-12T00:00:00')
         self.assertEqual(summary.get('ehrConsentExpireAuthored'), '2020-03-20T00:00:00')
@@ -417,7 +439,7 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
                                           datetime.datetime(2020, 4, 11))
         summary = self.send_get("Participant/{0}/Summary".format(participant_id))
         self.assertEqual(summary.get('consentForElectronicHealthRecordsAuthored'), '2020-04-11T00:00:00')
-        self.assertEqual(summary.get('enrollmentStatusMemberTime'), '2020-04-11T00:00:00')
+        self.assertEqual(summary.get('enrollmentStatusMemberTime'), '2020-02-12T00:00:00')
         self.assertEqual(summary.get('enrollmentStatus'), 'MEMBER')
         self.assertEqual(summary.get('ehrConsentExpireStatus'), 'UNSET')
         self.assertEqual(summary.get('ehrConsentExpireTime'), None)
@@ -684,7 +706,9 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
             "questionnaireOnTheBasicsAuthored": TIME_2.isoformat(),
             "signUpTime": TIME_1.isoformat(),
             "consentCohort": str(ParticipantCohort.COHORT_1),
-            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET)
+            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET),
+            "enrollmentStatusParticipantV3_0Time": "2016-01-01T00:00:00",
+            "enrollmentStatusParticipantV3_1Time": "2016-01-01T00:00:00"
         })
         self.assertJsonResponseMatches(expected, summary)
 
@@ -832,7 +856,9 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
             "primaryLanguage": "es",
             "signUpTime": TIME_1.isoformat(),
             "consentCohort": str(ParticipantCohort.COHORT_1),
-            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET)
+            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET),
+            "enrollmentStatusParticipantV3_0Time": "2016-01-01T00:00:00",
+            "enrollmentStatusParticipantV3_1Time": "2016-01-01T00:00:00"
         })
         self.assertJsonResponseMatches(expected, summary)
 
@@ -917,7 +943,9 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
             "primaryLanguage": "es",
             "signUpTime": TIME_1.isoformat(),
             "consentCohort": str(ParticipantCohort.COHORT_1),
-            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET)
+            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET),
+            "enrollmentStatusParticipantV3_0Time": "2016-01-01T00:00:00",
+            "enrollmentStatusParticipantV3_1Time": "2016-01-01T00:00:00"
         })
         self.assertJsonResponseMatches(expected, summary)
 
@@ -969,7 +997,9 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
             "primaryLanguage": "es",
             "signUpTime": TIME_1.isoformat(),
             "consentCohort": str(ParticipantCohort.COHORT_1),
-            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET)
+            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET),
+            "enrollmentStatusParticipantV3_0Time": "2016-01-01T00:00:00",
+            "enrollmentStatusParticipantV3_1Time": "2016-01-01T00:00:00"
         })
         self.assertJsonResponseMatches(expected, summary)
 
@@ -1107,7 +1137,9 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
             "questionnaireOnTheBasicsAuthored": TIME_2.isoformat(),
             "signUpTime": TIME_1.isoformat(),
             "consentCohort": str(ParticipantCohort.COHORT_1),
-            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET)
+            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET),
+            "enrollmentStatusParticipantV3_0Time": "2016-01-01T00:00:00",
+            "enrollmentStatusParticipantV3_1Time": "2016-01-01T00:00:00"
         })
         self.assertJsonResponseMatches(expected, summary)
 
@@ -1224,6 +1256,31 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
         for answer in answers:
             self.assertIn(answer.codeId, [code1.codeId, code2.codeId])
 
+    def test_participant_race_answers_aian_summary(self):
+
+        with FakeClock(TIME_1):
+            participant_id = self.create_participant()
+            self.send_consent(participant_id)
+
+        questionnaire_id = self.create_questionnaire("questionnaire_the_basics.json")
+        resource = self._load_response_json(
+            "questionnaire_the_basics_resp_multiple_race_aian.json",
+            questionnaire_id,
+            participant_id
+        )
+
+        with FakeClock(TIME_2):
+            resource["authored"] = TIME_2.isoformat()
+            self.send_post(_questionnaire_response_url(participant_id), resource)
+
+        summary_dao = ParticipantSummaryDao()
+
+        current_participant = \
+            list(filter(lambda x: x.participantId == int(participant_id.split('P')[-1]), summary_dao.get_all()))[0]
+
+        self.assertIsNotNone(current_participant)
+        self.assertEqual(current_participant.aian, 1)
+
     def test_gender_prefer_not_answer(self):
         with FakeClock(TIME_1):
             participant_id = self.create_participant()
@@ -1257,7 +1314,9 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
             "questionnaireOnTheBasicsAuthored": TIME_2.isoformat(),
             "signUpTime": TIME_1.isoformat(),
             "consentCohort": str(ParticipantCohort.COHORT_1),
-            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET)
+            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET),
+            "enrollmentStatusParticipantV3_0Time": "2016-01-01T00:00:00",
+            "enrollmentStatusParticipantV3_1Time": "2016-01-01T00:00:00"
         })
         self.assertJsonResponseMatches(expected, summary)
 
@@ -1299,7 +1358,9 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
             "questionnaireOnTheBasicsAuthored": TIME_2.isoformat(),
             "signUpTime": TIME_1.isoformat(),
             "consentCohort": str(ParticipantCohort.COHORT_1),
-            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET)
+            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET),
+            "enrollmentStatusParticipantV3_0Time": "2016-01-01T00:00:00",
+            "enrollmentStatusParticipantV3_1Time": "2016-01-01T00:00:00"
         })
         self.assertJsonResponseMatches(expected, summary)
 
@@ -1626,6 +1687,134 @@ class QuestionnaireResponseApiTest(BaseTestCase, BiobankTestMixin, PDRGeneratorT
             QuestionnaireResponse.questionnaireResponseId == response['id']
         ).one()
         self.assertIsNone(response_obj.externalId)
+
+    def test_questionnaire_life_functioning_survey(self):
+        with FakeClock(TIME_1):
+            participant_id = self.create_participant()
+            self.send_consent(participant_id)
+
+        summary = self.send_get(f"Participant/{participant_id}/Summary")
+        num_completed_ppi = summary.get('numCompletedPPIModules')
+        questionnaire_id = self.create_questionnaire("questionnaire_life_functioning.json")
+        resource = self._load_response_json("questionnaire_life_functioning_resp.json", questionnaire_id, participant_id)
+        self._save_codes(resource)
+        with FakeClock(datetime.datetime(2022, 9, 7, 1, 2, 3)):
+            self.send_post(_questionnaire_response_url(participant_id), resource)
+
+        summary = self.send_get(f"Participant/{participant_id}/Summary")
+        self.assertEqual(num_completed_ppi+1, summary.get('numCompletedPPIModules'))
+        self.assertEqual(summary['questionnaireOnLifeFunctioning'], 'SUBMITTED')
+        self.assertEqual(summary['questionnaireOnLifeFunctioningAuthored'], '2022-09-06T14:32:28')
+        self.assertEqual(summary['questionnaireOnLifeFunctioningTime'], '2022-09-07T01:02:03')
+
+    def test_remote_id_verified(self):
+        """ Test to see if a remote ID verification True Response saves successfully """
+        # Set up participant, questionnaire, questionnaire response & send POST request to API
+        participant = self.data_generator.create_database_participant()
+        participant_id = f'P{participant.participantId}'
+        authored = datetime.datetime.now()
+        self.send_consent(participant.participantId, authored=authored)
+        questionnaire_id = self.create_questionnaire("remote_id_verification_questionnaire.json")
+        resource = self._load_response_json("remote_id_verification_questionnaire_response.json",
+                                            questionnaire_id,
+                                            participant_id)
+        self._save_codes(resource)
+        response = self.send_post(_questionnaire_response_url(participant_id), resource)
+        # Check the questionnaire response table to make sure data is accurate
+        response_obj = self.session.query(QuestionnaireResponse).filter(
+            QuestionnaireResponse.questionnaireResponseId == response['id']
+        ).one()
+        self.assertEqual(response_obj.answers[0].valueString, "true")
+        self.assertEqual(datetime.datetime.utcfromtimestamp(
+            int(response_obj.answers[1].valueString)/1000),
+            datetime.datetime.utcfromtimestamp(1673985783245/1000))
+        # Check the DAO to make sure data is accurate
+        qr_response = self.dao.get_with_children(response['id'])
+        self.assertEqual(qr_response.answers[0].valueString, "true")
+        self.assertEqual(qr_response.answers[1].valueString, "1673985783245")
+
+    def test_remote_id_not_verified(self):
+        """ Test to see if a remote ID verification False Response saves successfully """
+        # Set up participant, questionnaire, questionnaire response & send POST request to API
+        participant = self.data_generator.create_database_participant()
+        participant_id = f'P{participant.participantId}'
+        authored = datetime.datetime.now()
+        self.send_consent(participant.participantId, authored=authored)
+        questionnaire_id = self.create_questionnaire("remote_id_verification_questionnaire.json")
+        resource = self._load_response_json("remote_id_verification_questionnaire_false_response.json",
+                                            questionnaire_id,
+                                            participant_id)
+        self._save_codes(resource)
+        response = self.send_post(_questionnaire_response_url(participant_id), resource)
+        # Check the questionnaire response table to make sure data is accurate
+        response_obj = self.session.query(QuestionnaireResponse).filter(
+            QuestionnaireResponse.questionnaireResponseId == response['id']
+        ).one()
+        self.assertEqual(response_obj.answers[0].valueString, "false")
+        self.assertEqual(datetime.datetime.utcfromtimestamp(
+            int(response_obj.answers[1].valueString)/1000),
+            datetime.datetime.utcfromtimestamp(1673985783245/1000))
+        # Check the DAO to make sure data is accurate
+        qr_response = self.dao.get_with_children(response['id'])
+        self.assertEqual(qr_response.answers[0].valueString, "false")
+        self.assertEqual(qr_response.answers[1].valueString, "1673985783245")
+
+    def test_etm_consent(self):
+        with FakeClock(TIME_1):
+            participant_id = self.create_participant()
+            self.send_consent(participant_id, language="es")
+
+        participant = self.send_get("Participant/%s" % participant_id)
+        summary = self.send_get("Participant/%s/Summary" % participant_id)
+
+        expected = dict(participant_summary_default_values_no_basics)
+        expected.update({
+            "genderIdentity": "UNSET",
+            "firstName": self.first_name,
+            "lastName": self.last_name,
+            "email": self.email,
+            "streetAddress": self.streetAddress,
+            "streetAddress2": self.streetAddress2,
+            "numCompletedPPIModules": 0,
+            "numCompletedBaselinePPIModules": 0,
+            "biobankId": participant["biobankId"],
+            "participantId": participant_id,
+            "consentForStudyEnrollmentTime": TIME_1.isoformat(),
+            "consentForStudyEnrollmentAuthored": TIME_1.isoformat(),
+            "consentForStudyEnrollmentFirstYesAuthored": TIME_1.isoformat(),
+            "primaryLanguage": "es",
+            "signUpTime": TIME_1.isoformat(),
+            "consentCohort": str(ParticipantCohort.COHORT_1),
+            "cohort2PilotFlag": str(ParticipantCohortPilotFlag.UNSET),
+            "enrollmentStatusParticipantV3_0Time": "2016-01-01T00:00:00",
+            "enrollmentStatusParticipantV3_1Time": "2016-01-01T00:00:00"
+        })
+        self.assertJsonResponseMatches(expected, summary)
+
+        # verify if the response is not consent, the primary language will not change
+        questionnaire_id = self.create_questionnaire("consent_for_etm_question.json")
+
+        resource = self._load_response_json("consent_for_etm_resp.json", questionnaire_id, participant_id)
+        resource['authored'] = TIME_1.isoformat()
+
+        self._save_codes(resource)
+        self.send_post(_questionnaire_response_url(participant_id), resource)
+
+        summary = self.send_get("Participant/%s/Summary" % participant_id)
+        self.assertEqual(summary['consentForEtM'], 'SUBMITTED')
+
+        resource = self._load_response_json("consent_for_etm_no.json", questionnaire_id, participant_id)
+        resource['authored'] = TIME_3.isoformat()
+
+        with FakeClock(TIME_3):
+            self._save_codes(resource)
+            self.send_post(_questionnaire_response_url(participant_id), resource)
+
+        summary = self.send_get("Participant/%s/Summary" % participant_id)
+        self.assertEqual(summary['semanticVersionForPrimaryConsent'], 'v1')
+        self.assertEqual(summary['consentForEtM'], 'SUBMITTED_NO_CONSENT')
+        self.assertEqual(summary['consentForEtMTime'], TIME_3.isoformat())
+        self.assertEqual(summary['consentForEtMAuthored'], TIME_3.isoformat())
 
     @classmethod
     def _load_response_json(cls, template_file_name, questionnaire_id, participant_id_str):

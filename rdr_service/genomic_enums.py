@@ -119,6 +119,19 @@ class GenomicJob(messages.Enum):
     RECONCILE_CVL_ALERTS = 62
     RECONCILE_CVL_RESOLVE = 63
     CHECK_FOR_W1IL_GROR_RESUBMIT = 64
+    INGEST_RESULT_READY = 65
+    INGEST_APPOINTMENT = 66
+    RESULTS_PIPELINE_WITHDRAWALS = 67
+    GEM_RESULT_REPORTS = 68
+    APPOINTMENT_METRICS_FILE_INGEST = 69
+    AW3_MISSING_DATA_FILE_REPORT = 70
+    APPOINTMENT_METRICS_RECONCILE = 71
+    RECONCILE_MESSAGE_BROKER_CVL_RESULTS_READY = 72
+    RECONCILE_MESSAGE_BROKER_CVL_RESULTS_VIEWED = 73
+    UPDATE_ARRAY_STORAGE_CLASS = 74
+    UPDATE_WGS_STORAGE_CLASS = 75
+    CHECK_APPOINTMENT_GROR_CHANGED = 76
+    CHECK_GCR_OUTREACH_ESCALATION = 77
 
     # Data Quality Pipeline Jobs
     # Naming matters for reports (timeframe_level_report_target)
@@ -239,28 +252,19 @@ class ResultsModuleType(messages.Enum):
 
 
 class GenomicReportState(messages.Enum):
-
     UNSET = 0
-
     # GEM Reporting States
     GEM_RPT_READY = 1
     GEM_RPT_PENDING_DELETE = 2
     GEM_RPT_DELETED = 3
-
     # PGX Reporting States
     PGX_RPT_READY = 4
-    PGX_RPT_PENDING_DELETE = 5
-    PGX_RPT_DELETED = 6
-
     # HDR Reporting States
-    HDR_RPT_UNINFORMATIVE = 7
-    HDR_RPT_POSITIVE = 8
-    HDR_RPT_PENDING_DELETE = 9
-    HDR_RPT_DELETED = 10
-
+    HDR_RPT_UNINFORMATIVE = 5
+    HDR_RPT_POSITIVE = 6
     # CVL Generic Reporting States
-    CVL_RPT_PENDING_DELETE = 11
-    CVL_RPT_DELETED = 12
+    CVL_RPT_PENDING_DELETE = 20
+    CVL_RPT_DELETED = 21
 
 
 class GenomicSubProcessStatus(messages.Enum):
@@ -279,6 +283,8 @@ class GenomicSubProcessResult(messages.Enum):
     INVALID_FILE_NAME = 3
     INVALID_FILE_STRUCTURE = 4
     ERROR = 5
+    MISSING_CONFIG = 6
+    NO_RESULTS = 7
 
 
 class GenomicManifestTypes(messages.Enum):
@@ -337,6 +343,7 @@ class GenomicIncidentCode(messages.Enum):
     FILE_VALIDATION_FAILED_VALUES = 9
     FILE_VALIDATION_INVALID_FILE_NAME = 10
     INFORMING_LOOP_TO_EVENTS_MISMATCH = 11
+    UNABLE_TO_RESOLVE_MESSAGE_BROKER_RECORD = 12
 
 
 class GenomicIncidentStatus(messages.Enum):

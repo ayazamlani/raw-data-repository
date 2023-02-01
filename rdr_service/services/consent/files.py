@@ -54,6 +54,8 @@ class ConsentFileAbstractFactory(ABC):
             return self._build_ehr_consent(blob_wrapper)
         elif self._is_gror_consent(blob_wrapper):
             return self._build_gror_consent(blob_wrapper)
+        elif self._is_etm_consent(blob_wrapper):
+            return self._build_etm_consent(blob_wrapper)
 
     def get_primary_consents(self) -> List['PrimaryConsentFile']:
         return [
@@ -97,6 +99,13 @@ class ConsentFileAbstractFactory(ABC):
             if self._is_wear_consent(blob_wrapper)
         ]
 
+    def get_etm_consents(self) -> List['EtmConsentFile']:
+        return [
+            self._build_etm_consent(blob_wrapper)
+            for blob_wrapper in self.consent_blobs
+            if self._is_etm_consent(blob_wrapper)
+        ]
+
     def get_from_path(self, file_path: str, consent_date=None) -> 'ConsentFile':
         wrapper = None
         for consent in self.consent_blobs:
@@ -115,6 +124,8 @@ class ConsentFileAbstractFactory(ABC):
             return self._build_primary_update_consent(wrapper, consent_date=consent_date)
         elif self._is_wear_consent(wrapper):
             return self._build_wear_consent(wrapper)
+        elif self._is_etm_consent(wrapper):
+            return self._build_etm_consent(wrapper)
 
     @abstractmethod
     def _is_primary_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> bool:
@@ -141,6 +152,10 @@ class ConsentFileAbstractFactory(ABC):
         ...
 
     @abstractmethod
+    def _is_etm_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> bool:
+        ...
+
+    @abstractmethod
     def _build_primary_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> 'PrimaryConsentFile':
         ...
 
@@ -163,6 +178,10 @@ class ConsentFileAbstractFactory(ABC):
 
     @abstractmethod
     def _build_wear_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> 'WearConsentFile':
+        ...
+
+    @abstractmethod
+    def _build_etm_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> 'EtmConsentFile':
         ...
 
     @abstractmethod
@@ -214,6 +233,9 @@ class VibrentConsentFactory(ConsentFileAbstractFactory):
     def _is_wear_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> bool:
         raise NotImplementedError('Wear consent validation not implemented for Vibrent')
 
+    def _is_etm_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> bool:
+        return 'exploring_the_mind_consent_form' in basename(blob_wrapper.blob.name)
+
     def _build_primary_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> 'PrimaryConsentFile':
         return VibrentPrimaryConsentFile(pdf=blob_wrapper.get_parsed_pdf(), blob=blob_wrapper.blob)
 
@@ -237,6 +259,9 @@ class VibrentConsentFactory(ConsentFileAbstractFactory):
     def _build_wear_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> 'WearConsentFile':
         raise NotImplementedError('Wear consent validation not implemented for Vibrent')
 
+    def _build_etm_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> 'EtmConsentFile':
+        return VibrentEtmConsentFile(pdf=blob_wrapper.get_parsed_pdf(), blob=blob_wrapper.blob)
+
     def _get_source_bucket(self) -> str:
         return config.getSettingJson(config.CONSENT_PDF_BUCKET)['vibrent']
 
@@ -253,7 +278,8 @@ class CeConsentFactory(ConsentFileAbstractFactory):
         return pdf.has_text([(
             'Consent to Join the All of Us Research Program',
             'Consentimiento para Participar en el Programa Científico',
-            'Consentimiento para Participar en el\nPrograma Cientíﬁco'
+            'Consentimiento para Participar en el\nPrograma Cientíﬁco',
+            'Consentimiento para Participar en el Programa Cientíﬁco'
         )])
 
     def _is_cabor_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> bool:
@@ -291,8 +317,16 @@ class CeConsentFactory(ConsentFileAbstractFactory):
         pdf = blob_wrapper.get_parsed_pdf()
         return pdf.has_text([(
             'All of Us WEAR Study',
-            'el Estudio WEAR de All of Us'
+            'All of Us WEAR\nStudy',
+            'el Estudio WEAR de All of Us',
+            'Estudio del uso desensores portátiles',
+            'Estudio\ndel uso de sensores portátiles',
+            'All of Us Wearable Study',
+            'All of Us Wearable\nStudy'
         )])
+
+    def _is_etm_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> bool:
+        return False
 
     def _build_primary_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> 'PrimaryConsentFile':
         return CePrimaryConsentFile(pdf=blob_wrapper.get_parsed_pdf(), blob=blob_wrapper.blob)
@@ -312,6 +346,9 @@ class CeConsentFactory(ConsentFileAbstractFactory):
 
     def _build_wear_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> 'WearConsentFile':
         return CeWearConsentFile(pdf=blob_wrapper.get_parsed_pdf(), blob=blob_wrapper.blob)
+
+    def _build_etm_consent(self, blob_wrapper: '_ConsentBlobWrapper') -> 'EtmConsentFile':
+        pass
 
     def _get_source_bucket(self) -> str:
         return config.getSettingJson(config.CONSENT_PDF_BUCKET)['careevolution']
@@ -387,7 +424,12 @@ class ConsentFile(ABC):
 
 class PrimaryConsentFile(ConsentFile, ABC):
     def get_is_va_consent(self):
-        return self.pdf.get_page_number_of_text(['you will get care at a VA facility']) is not None
+        return self.pdf.get_page_number_of_text([
+            (
+                'you will get care at a VA facility',
+                'Si necesita atención de seguimiento para su lesión, VA lo cubrirá.'
+            )
+        ]) is not None
 
 
 class CaborConsentFile(ConsentFile, ABC):
@@ -396,7 +438,12 @@ class CaborConsentFile(ConsentFile, ABC):
 
 class EhrConsentFile(ConsentFile, ABC):
     def get_is_va_consent(self):
-        return self.pdf.get_page_number_of_text(['We may ask you to go to a local clinic to be measured']) is not None
+        return self.pdf.get_page_number_of_text([
+            (
+                'We may ask you to go to a local clinic to be measured',
+                'Es posible que le pidamos que visite a una clínica local para dar sus muestras \nbiológicas.'
+            )
+        ]) is not None
 
     def is_sensitive_form(self):
         return False
@@ -417,6 +464,10 @@ class GrorConsentFile(ConsentFile, ABC):
     @abstractmethod
     def _get_confirmation_check_elements(self):
         ...
+
+
+class EtmConsentFile(ConsentFile, ABC):
+    ...
 
 
 class PrimaryConsentUpdateFile(PrimaryConsentFile, ABC):
@@ -530,20 +581,21 @@ class VibrentEhrConsentFile(EhrConsentFile):
     def _get_printed_name_elements(self):
         signature_page_number = self._get_signature_page_number()
         return self.pdf.get_elements_intersecting_box(
-            Rect.from_edges(left=350, right=500, bottom=45, top=50),
+            Rect.from_edges(left=350, right=500, bottom=45, top=55),
             page=signature_page_number
         )
 
     def is_sensitive_form(self):
-        return self.pdf.get_page_number_of_text([
-            ('I agree to release sensitive information from my EHRs', )
-        ]) is not None
+        return self.pdf.get_page_number_of_text([(
+            'I agree to release sensitive information from my EHRs',
+            'Acepto compartir información confidencial de mis EHR'
+        )]) is not None
 
     def _get_signature_page_number(self):
-        if self.is_sensitive_form():
-            return 9
-        else:
-            return 6
+        return self.pdf.get_page_number_of_text([(
+            'You will have access to a signed copy of this form',
+            'Usted tendrá acceso a una copia firmada de este documento'
+        )])
 
     def has_valid_sensitive_form_initials(self):
         initial_location_list = [
@@ -568,13 +620,7 @@ class VibrentEhrConsentFile(EhrConsentFile):
                         # Move to the next element to check if nothing was found here
                         continue
 
-                    if initial_text_found is None:
-                        # If no initials were parsed yet, set the first initial string found as the expected value
-                        initial_text_found = initial_from_element
-                    elif initial_text_found.lower() != initial_from_element.lower():
-                        # If the initials don't all match with each other, report that they weren't valid
-                        return False
-
+                    initial_text_found = initial_from_element
                     initial_text_at_location = initial_from_element
                     break
 
@@ -673,6 +719,28 @@ class VibrentPrimaryConsentUpdateFile(PrimaryConsentUpdateFile):
         return self.pdf.get_elements_intersecting_box(
             Rect.from_edges(left=350, right=500, bottom=45, top=50),
             page=self._get_signature_page()
+        )
+
+
+class VibrentEtmConsentFile(EtmConsentFile):
+    _SIGNATURE_PAGE = 7
+
+    def _get_signature_elements(self):
+        return self.pdf.get_elements_intersecting_box(
+            Rect.from_edges(left=150, right=400, bottom=155, top=160),
+            page=self._SIGNATURE_PAGE
+        )
+
+    def _get_date_elements(self):
+        return self.pdf.get_elements_intersecting_box(
+            Rect.from_edges(left=130, right=400, bottom=110, top=115),
+            page=self._SIGNATURE_PAGE
+        )
+
+    def _get_printed_name_elements(self):
+        return self.pdf.get_elements_intersecting_box(
+            Rect.from_edges(left=350, right=500, bottom=45, top=50),
+            page=self._SIGNATURE_PAGE
         )
 
 

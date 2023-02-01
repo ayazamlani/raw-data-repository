@@ -1,7 +1,5 @@
 """The main API definition file for endpoints that trigger MapReduces and batch tasks."""
 
-import rdr_service.activate_debugger  # pylint: disable=unused-import
-
 from flask import Flask, got_request_exception
 from flask_restful import Api
 from sqlalchemy.exc import DBAPIError
@@ -55,6 +53,10 @@ def _build_resource_app():
     _api.add_resource(cloud_tasks_api.RebuildRetentionEligibleMetricsApi,
                       TASK_PREFIX + "RebuildRetentionEligibleMetricsApi",
                       endpoint="batch_rebuild_retention_eligible_task", methods=["POST"])
+
+    _api.add_resource(cloud_tasks_api.PtscHealthDataTransferValidTaskApi,
+                      TASK_PREFIX + "PtscHealthDataTransferValidTaskApi",
+                      endpoint="ptsc_health_data_transfer_valid_task", methods=["POST"])
 
     # Store message broker event data
     _api.add_resource(message_broker_cloud_tasks_api.StoreMessageBrokerEventDataTaskApi,
@@ -123,6 +125,11 @@ def _build_resource_app():
                       TASK_PREFIX + "IngestUserEventMetricsApi",
                       endpoint="ingest_user_event_metrics", methods=["POST"])
 
+    # Ingest appointment event metrics from files
+    _api.add_resource(genomic_cloud_tasks_api.IngestAppointmentMetricsApi,
+                      TASK_PREFIX + "IngestAppointmentMetricsApi",
+                      endpoint="ingest_appointment_event_metrics", methods=["POST"])
+
     # Ingest member samples from raw models
     _api.add_resource(genomic_cloud_tasks_api.IngestDataFilesTaskApi,
                       TASK_PREFIX + "IngestDataFilesTaskApi",
@@ -138,14 +145,24 @@ def _build_resource_app():
                       endpoint="calculate_contamination_category_task", methods=["POST"])
 
     # Ingest Message Broker Data
-    _api.add_resource(genomic_cloud_tasks_api.IngestFromMessageBrokerDataApi,
-                      TASK_PREFIX + "IngestFromMessageBrokerDataApi",
-                      endpoint="ingest_from_message_broker_data_task", methods=["POST"])
+    _api.add_resource(genomic_cloud_tasks_api.IngestGenomicMessageBrokerDataApi,
+                      TASK_PREFIX + "IngestGenomicMessageBrokerDataApi",
+                      endpoint="ingest_genomic_message_broker_data_task", methods=["POST"])
+
+    # Ingest Message Broker Data - appointments only
+    _api.add_resource(genomic_cloud_tasks_api.IngestGenomicMessageBrokerAppointmentApi,
+                      TASK_PREFIX + "IngestGenomicMessageBrokerAppointmentApi",
+                      endpoint="ingest_genomic_message_broker_appointment_task", methods=["POST"])
 
     # Update Genomic Set Member Job Run
     _api.add_resource(genomic_cloud_tasks_api.GenomicSetMemberUpdateApi,
                       TASK_PREFIX + "GenomicSetMemberUpdateApi",
                       endpoint="genomic_set_member_update_task", methods=["POST"])
+
+    # Upsert GC validation metrics
+    _api.add_resource(genomic_cloud_tasks_api.GenomicGCMetricsUpsertApi,
+                      TASK_PREFIX + "GenomicGCMetricsUpsertApi",
+                      endpoint="genomic_gc_metrics_upsert", methods=["POST"])
 
     #
     # End Genomic Cloud Task API endpoints

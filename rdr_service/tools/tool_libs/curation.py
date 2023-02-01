@@ -2,6 +2,7 @@
 #
 # Template for RDR tool python program.
 #
+from datetime import datetime
 import logging
 import pytz
 from sqlalchemy import and_, case, insert, or_, text, not_
@@ -25,7 +26,8 @@ from rdr_service.model.questionnaire import QuestionnaireConcept, QuestionnaireH
 from rdr_service.model.questionnaire_response import QuestionnaireResponse, QuestionnaireResponseAnswer, \
     QuestionnaireResponseClassificationType
 from rdr_service.model.curation_etl import CdrExcludedCode
-from rdr_service.participant_enums import QuestionnaireResponseStatus, WithdrawalStatus, CdrEtlCodeType
+from rdr_service.participant_enums import QuestionnaireResponseStatus, WithdrawalStatus, CdrEtlCodeType,\
+    QuestionnaireStatus
 from rdr_service.services.gcp_utils import gcp_sql_export_csv
 from rdr_service.tools.tool_libs.tool_base import cli_run, ToolBase
 from rdr_service.dao.curation_etl_dao import CdrEtlRunHistoryDao, CdrEtlSurveyHistoryDao, CdrExcludedCodeDao
@@ -65,6 +67,40 @@ class CurationExportClass(ToolBase):
         self.cdr_etl_run_history_dao = CdrEtlRunHistoryDao()
         self.cdr_etl_survey_history_dao = CdrEtlSurveyHistoryDao()
 
+    @classmethod
+    def _render_export_select(cls, export_sql, column_name_list):
+        # We need to handle NULLs and convert them to empty strings as gcloud sql has a bug when putting them in a csv
+        # https://issuetracker.google.com/issues/64579566
+        # NULL characters (\0) can also corrupt the output file, so they're removed.
+        # And whitespace was trimmed before so that's moved into the SQL as well
+        # Newlines and double-quotes are also replaced with spaces and single-quotes, respectively
+        data_select_list = [
+            f"TRIM(REPLACE(REPLACE(REPLACE(COALESCE({name}, ''), '\\0', ''), '\n', ' '), '\\\"', '\\\''))"
+            for name in column_name_list
+        ]
+
+        # We have to add a row at the start for the CSV headers, Google hasn't implemented another way yet
+        # https://issuetracker.google.com/issues/111342008
+        # The below format forces the headers to the top of the file.
+        # Curation would like them in the file for schema validation (ROC-687)
+        return f"""
+            SELECT {', '.join(column_name_list)}
+            FROM
+            (
+                (
+                    SELECT
+                      1 as sort_col,
+                      {', '.join([f"'{column_name}'" for column_name in column_name_list])}
+                )
+                UNION ALL
+                (
+                    SELECT 2 as sort_col, {','.join(data_select_list)}
+                    FROM ({export_sql}) as data
+                )
+            ) a
+            ORDER BY a.sort_col ASC
+        """
+
     def get_field_names(self, table, exclude=None):
         """
         Run a query and get the field list.
@@ -87,45 +123,13 @@ class CurationExportClass(ToolBase):
         :param table: Table name
         :return:
         """
-        cloud_file = f'gs://{self.args.export_path}/{table}.csv'
-
-        # We have to add a row at the start for the CSV headers, Google hasn't implemented another way yet
-        # https://issuetracker.google.com/issues/111342008
-        column_names = self.get_field_names(table, ['id'])
-        header_string = ','.join([f"'{column_name}'" for column_name in column_names])
-
-        # We need to handle NULLs and convert them to empty strings as gcloud sql has a bug when putting them in a csv
-        # https://issuetracker.google.com/issues/64579566
-        # NULL characters (\0) can also corrupt the output file, so they're removed.
-        # And whitespace was trimmed before so that's moved into the SQL as well
-        # Newlines and double-quotes are also replaced with spaces and single-quotes, respectively
-        field_list = [f"TRIM(REPLACE(REPLACE(REPLACE(COALESCE({name}, ''), '\\0', ''), '\n', ' '), '\\\"', '\\\''))"
-                      for name in column_names]
-
-        # Unions are unordered, so the headers do not always end up at the top of the file.
-        # The below format forces the headers to the top of the file
-        # This is needed because gcloud export sql doesn't support column headers and
-        # Curation would like them in the file for schema validation (ROC-687)
-        sql_string = f"""
-            SELECT {','.join(column_names)}
-            FROM
-            (
-                (
-                    SELECT
-                      1 as sort_col,
-                      {header_string}
-                )
-                UNION ALL
-                (
-                    SELECT 2,
-                        {','.join(field_list)}
-                    FROM {table}
-                )
-            ) a
-            ORDER BY a.sort_col ASC
-        """
+        sql_string = self._render_export_select(
+            export_sql=f"SELECT * FROM {table}",
+            column_name_list=self.get_field_names(table, exclude=['id'])
+        )
 
         _logger.info(f'exporting {table}')
+        cloud_file = f'gs://{self.args.export_path}/{table}.csv'
         gcp_sql_export_csv(self.args.project, sql_string, cloud_file, database='cdm')
 
     def export_cope_map(self):
@@ -139,30 +143,19 @@ class CurationExportClass(ToolBase):
 
             external_id_to_month_cases.append(f"when qh.external_id in ({','.join(quoted_ids)}) then '{month.lower()}'")
 
-        export_sql = f"""
-            SELECT participant_id, questionnaire_response_id, semantic_version, cope_month
-            FROM
-            (
-                (
-                    SELECT
-                      1 as sort_col,
-                      'participant_id', 'questionnaire_response_id', 'semantic_version', 'cope_month'
-                )
-                UNION ALL
-                (
-                    SELECT
-                      2 as sort_col,
-                      participant_id, questionnaire_response_id, semantic_version,
-                      CASE {' '.join(external_id_to_month_cases)}
-                      END AS 'cope_month'
-                    FROM questionnaire_history qh
-                    INNER JOIN questionnaire_response qr ON qr.questionnaire_id = qh.questionnaire_id
-                        AND qr.questionnaire_version = qh.version
-                    WHERE qh.external_id IN ({','.join(cope_external_id_flat_list)})
-                )
-            ) a
-            ORDER BY a.sort_col ASC
-        """
+        export_sql = self._render_export_select(
+            export_sql=f"""
+                SELECT
+                  participant_id, questionnaire_response_id, semantic_version,
+                  CASE {' '.join(external_id_to_month_cases)}
+                  END AS 'cope_month'
+                FROM questionnaire_history qh
+                INNER JOIN questionnaire_response qr ON qr.questionnaire_id = qh.questionnaire_id
+                    AND qr.questionnaire_version = qh.version
+                WHERE qh.external_id IN ({','.join(cope_external_id_flat_list)})
+            """,
+            column_name_list=['participant_id', 'questionnaire_response_id', 'semantic_version', 'cope_month']
+        )
         export_name = 'cope_survey_semantic_version_map'
         cloud_file = f'gs://{self.args.export_path}/{export_name}.csv'
 
@@ -195,13 +188,103 @@ class CurationExportClass(ToolBase):
         _logger.info(f'exporting {code_info_export_name}')
         gcp_sql_export_csv(self.args.project, etl_run_code_info, cloud_file, database='rdr')
 
+    def export_survey_conduct(self):
+        export_sql = self._render_export_select(
+            export_sql=f"""
+                SELECT qr.questionnaire_response_id survey_conduct_id,
+                        p.participant_id person_id,
+                        COALESCE(voc_c.concept_id, 0) survey_concept_id,
+                        NULL survey_start_date,
+                        NULL survey_start_datetime,
+                        DATE(qr.authored) survey_end_date,
+                        qr.authored survey_end_datetime,
+                        CASE WHEN
+                            p.participant_origin = 'vibrent' THEN       1
+                            ELSE                                        2
+                        END provider_id,
+                        CASE WHEN
+                            qr.non_participant_author = 'CATI' THEN     42530794
+                            ELSE                                        0
+                        END assisted_concept_id,
+                        0 respondent_type_concept_id,
+                        0 timing_concept_id,
+                        CASE WHEN
+                            qr.non_participant_author = 'CATI' THEN     42530794
+                            ELSE                                        42531021
+                        END collection_method_concept_id,
+                        CASE WHEN
+                            qr.non_participant_author = 'CATI' THEN     'Telephone'
+                            ELSE                                        'No matching concept'
+                        END assisted_source_value,
+                        NULL respondent_type_source_value,
+                        '' timing_source_value,
+                        CASE WHEN
+                            qr.non_participant_author = 'CATI' THEN     'Telephone'
+                            ELSE                                        'Electronic'
+                        END collection_method_source_value,
+                        mc.value survey_source_value,
+                        mc.code_id survey_source_concept_id,
+                        qr.questionnaire_response_id survey_source_identifier,
+                        0 validated_survey_concept_id,
+                        '' validated_survey_source_value,
+                        NULL survey_version_number,
+                        '' visit_occurrence_id,
+                        '' response_visit_occurrence_id
+                FROM questionnaire_response qr
+                INNER JOIN questionnaire_concept qc
+                    ON qc.questionnaire_id = qr.questionnaire_id AND qc.questionnaire_version = qr.questionnaire_version
+                INNER JOIN code mc ON mc.code_id = qc.code_id
+                INNER JOIN participant p ON p.participant_id = qr.participant_id
+                LEFT JOIN voc.concept voc_c
+                    ON voc_c.concept_code = mc.value AND voc_c.vocabulary_id = 'PPI'
+                    AND voc_c.domain_id = 'observation' AND voc_c.concept_class_id = 'module'
+                WHERE qr.questionnaire_response_id in (
+                    SELECT DISTINCT sc.questionnaire_response_id
+                    FROM cdm.src_clean sc
+                )
+            """,
+            column_name_list=[
+                'survey_conduct_id',
+                'person_id',
+                'survey_concept_id',
+                'survey_start_date',
+                'survey_start_datetime',
+                'survey_end_date',
+                'survey_end_datetime',
+                'provider_id',
+                'assisted_concept_id',
+                'respondent_type_concept_id',
+                'timing_concept_id',
+                'collection_method_concept_id',
+                'assisted_source_value',
+                'respondent_type_source_value',
+                'timing_source_value',
+                'collection_method_source_value',
+                'survey_source_value',
+                'survey_source_concept_id',
+                'survey_source_identifier',
+                'validated_survey_concept_id',
+                'validated_survey_source_value',
+                'survey_version_number',
+                'visit_occurrence_id',
+                'response_visit_occurrence_id'
+            ]
+        )
+        export_name = 'survey_conduct'
+        cloud_file = f'gs://{self.args.export_path}/{export_name}.csv'
+
+        _logger.info(f'exporting {export_name}')
+        gcp_sql_export_csv(self.args.project, export_sql, cloud_file, database='rdr')
+
     def run_curation_export(self):
         # Because there are no models for the data stored in the 'cdm' database, we'll
         # just use a standard MySQLDB connection.
         self.db_conn = self.gcp_env.make_mysqldb_connection(user='alembic', database='cdm')
 
-        if not self.args.export_path.startswith('gs://all-of-us-rdr-prod-cdm/'):
-            raise NameError("Export path must start with 'gs://all-of-us-rdr-prod-cdm/'.")
+        if not any((self.args.export_path.startswith('gs://all-of-us-rdr-prod-cdm/'),
+                    self.args.export_path.startswith('gs://all-of-us-rdr-stable-cdm'))):
+            raise NameError("Export path must start with 'gs://all-of-us-rdr-prod-cdm/'"
+                            "or 'gs://all-of-us-rdr-stable-cdm/'.")
         if self.args.export_path.endswith('/'):  # Remove trailing slash if present.
             self.args.export_path = self.args.export_path[5:-1]
 
@@ -216,6 +299,7 @@ class CurationExportClass(ToolBase):
 
         self.export_cope_map()
         self.export_participant_id_map()
+        self.export_survey_conduct()
         self.export_etl_run_info()
 
         for table in self.problematic_tables:
@@ -250,7 +334,7 @@ class CurationExportClass(ToolBase):
             else_=code_reference.value
         )
 
-    def _populate_questionnaire_answers_by_module(self, session):
+    def _populate_questionnaire_answers_by_module(self, session, cutoff_date=None):
         self._set_rdr_model_schema([Code, QuestionnaireResponse, QuestionnaireConcept, QuestionnaireHistory,
                                     QuestionnaireQuestion, QuestionnaireResponseAnswer, CdrExcludedCode])
         column_map = {
@@ -285,8 +369,13 @@ class CurationExportClass(ToolBase):
             QuestionnaireQuestion
         ).filter(
             QuestionnaireResponse.status != QuestionnaireResponseStatus.IN_PROGRESS,
-            QuestionnaireResponse.classificationType != QuestionnaireResponseClassificationType.DUPLICATE
+            QuestionnaireResponse.classificationType != QuestionnaireResponseClassificationType.DUPLICATE,
+            QuestionnaireResponse.classificationType != QuestionnaireResponseClassificationType.PROFILE_UPDATE
         )
+        if cutoff_date:
+            answers_by_module_select = answers_by_module_select.filter(
+                QuestionnaireResponse.authored < cutoff_date
+            )
 
         insert_query = insert(QuestionnaireAnswersByModule).from_select(column_map.keys(), answers_by_module_select)
         session.execute(insert_query)
@@ -400,7 +489,17 @@ class CurationExportClass(ToolBase):
             ParticipantSummary,
             ParticipantSummary.participantId == Participant.participantId
         ).filter(
-            Participant.isGhostId.isnot(True),
+            or_(
+                Participant.isGhostId.isnot(True),
+                and_(
+                    ParticipantSummary.participantId.isnot(None),
+                    Participant.dateAddedGhost > datetime(2022, 3, 18),
+                    or_(
+                        ParticipantSummary.consentForElectronicHealthRecords != QuestionnaireStatus.UNSET,
+                        ParticipantSummary.questionnaireOnTheBasics == QuestionnaireStatus.SUBMITTED
+                    )
+                )
+            ),
             Participant.isTestParticipant.isnot(True),
             Participant.participantOrigin != 'careevolution',
             HPO.name != 'TEST',
@@ -415,6 +514,7 @@ class CurationExportClass(ToolBase):
             ),
             QuestionnaireResponse.status != QuestionnaireResponseStatus.IN_PROGRESS,
             QuestionnaireResponse.classificationType != QuestionnaireResponseClassificationType.DUPLICATE,
+            QuestionnaireResponse.classificationType != QuestionnaireResponseClassificationType.PROFILE_UPDATE,
             and_(
                 ParticipantSummary.dateOfBirth.isnot(None),
                 ParticipantSummary.consentForStudyEnrollmentFirstYesAuthored.isnot(None),
@@ -557,7 +657,7 @@ class CurationExportClass(ToolBase):
 
         # using alembic here to get the database_factory code to set up a connection to the CDM database
         with self.get_session(database_name='cdm', alembic=True, isolation_level='READ UNCOMMITTED') as session:
-            self._populate_questionnaire_answers_by_module(session)
+            self._populate_questionnaire_answers_by_module(session, cutoff_date)
             self._populate_src_clean(session, cutoff_date)
 
         with self.get_session() as session:

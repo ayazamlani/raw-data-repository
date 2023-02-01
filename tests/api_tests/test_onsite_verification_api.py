@@ -1,4 +1,9 @@
+from datetime import datetime
+
 from tests.helpers.unittest_base import BaseTestCase
+
+from rdr_service.dao.participant_summary_dao import ParticipantSummaryDao
+from rdr_service.participant_enums import OnSiteVerificationType, OnSiteVerificationVisitType
 
 
 class OnsiteVerificationApiTest(BaseTestCase):
@@ -12,7 +17,11 @@ class OnsiteVerificationApiTest(BaseTestCase):
         self.p = self.data_generator.create_database_participant(hpoId=self.hpo.hpoId)
         self.p2 = self.data_generator.create_database_participant(hpoId=self.hpo.hpoId)
         self.p3 = self.data_generator.create_database_participant(hpoId=self.hpo.hpoId)
-        self.ps = self.data_generator.create_database_participant_summary(participant=self.p)
+        self.data_generator.create_database_participant_summary(participant=self.p)
+        self.data_generator.create_database_participant_summary(participant=self.p2)
+        self.data_generator.create_database_participant_summary(participant=self.p3)
+
+        self.ps_dao = ParticipantSummaryDao()
 
     def test_onsite_verification(self):
         path = 'Onsite/Id/Verification'
@@ -130,3 +139,10 @@ class OnsiteVerificationApiTest(BaseTestCase):
                               'visitType': 'UNSET'}
                          ]})
 
+        participant_summary = self.ps_dao.get_by_participant_id(self.p.participantId)
+        self.assertEqual(participant_summary.onsiteIdVerificationTime, datetime(2022, 2, 22, 6, 7, 8))
+        self.assertEqual(participant_summary.onsiteIdVerificationType, OnSiteVerificationType.TWO_OF_PII)
+        self.assertEqual(participant_summary.onsiteIdVerificationVisitType,
+                         OnSiteVerificationVisitType.PHYSICAL_MEASUREMENTS_ONLY)
+        self.assertEqual(participant_summary.onsiteIdVerificationUser, 'test@mail.com')
+        self.assertEqual(participant_summary.onsiteIdVerificationSite, self.site.siteId)

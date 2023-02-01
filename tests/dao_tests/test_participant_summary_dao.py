@@ -1,6 +1,7 @@
 import copy
 import datetime
 import json
+import mock
 import time
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 
@@ -12,6 +13,7 @@ from rdr_service.dao.biobank_stored_sample_dao import BiobankStoredSampleDao
 from rdr_service.dao.participant_dao import ParticipantDao
 from rdr_service.dao.participant_summary_dao import ParticipantSummaryDao
 from rdr_service.dao.physical_measurements_dao import PhysicalMeasurementsDao
+from rdr_service.logic.enrollment_info import EnrollmentInfo
 from rdr_service.model.biobank_order import BiobankOrder, BiobankOrderIdentifier, BiobankOrderedSample
 from rdr_service.model.biobank_stored_sample import BiobankStoredSample
 from rdr_service.model.measurements import PhysicalMeasurements
@@ -19,12 +21,15 @@ from rdr_service.model.participant import Participant
 from rdr_service.model.participant_summary import ParticipantSummary
 from rdr_service.participant_enums import (
     EnrollmentStatus,
-    ParticipantCohort,
+    EnrollmentStatusV30,
+    EnrollmentStatusV31,
     PhysicalMeasurementsStatus,
     QuestionnaireStatus,
     SampleStatus,
+    SelfReportedPhysicalMeasurementsStatus
 )
 from rdr_service.query import FieldFilter, Operator, OrderBy, Query
+from rdr_service.services.system_utils import DateRange
 from tests.test_data import load_measurement_json
 from tests.helpers.unittest_base import BaseTestCase
 from tests.helpers.mysql_helper_data import PITT_HPO_ID
@@ -65,24 +70,34 @@ class ParticipantSummaryDaoTest(BaseTestCase):
         )
         self.ascending_biobank_id_query = Query([], OrderBy("biobankId", True), 2, None)
         self.descending_biobank_id_query = Query([], OrderBy("biobankId", False), 2, None)
-        self.enrollment_status_order_query = Query([], OrderBy("enrollmentStatus", True), 2, None)
+        self.enrollment_status_order_query = Query([], OrderBy("enrollmentStatusV3_1", True), 2, None)
         self.hpo_id_order_query = Query([], OrderBy("hpoId", True), 2, None)
         self.first_name_order_query = Query([], OrderBy("firstName", True), 2, None)
+
+        response_dao_patch = mock.patch(
+            'rdr_service.dao.participant_summary_dao.QuestionnaireResponseRepository'
+        )
+        response_dao_mock = response_dao_patch.start()
+        self.mock_ehr_interest_ranges = response_dao_mock.get_interest_in_sharing_ehr_ranges
+        self.mock_ehr_interest_ranges.return_value = []
+        self.addCleanup(response_dao_patch.stop)
+
+        sample_dao_patch = mock.patch(
+            'rdr_service.dao.participant_summary_dao.BiobankStoredSampleDao'
+        )
+        sample_dao_mock = sample_dao_patch.start()
+        self.received_samples_mock = sample_dao_mock.load_confirmed_dna_samples
+        self.received_samples_mock.return_value = []
+        self.addCleanup(sample_dao_patch.stop)
 
     def assert_no_results(self, query):
         results = self.dao.query(query)
         self.assertEqual([], results.items)
         self.assertIsNone(results.pagination_token)
 
-    def assert_results(self, query, items, pagination_token=None):
+    def assert_results(self, query, items):
         results = self.dao.query(query)
         self.assertListAsDictEquals(items, results.items)
-        self.assertEqual(
-            pagination_token,
-            results.pagination_token,
-            "Pagination tokens don't match; decoded = %s, %s"
-            % (_decode_token(pagination_token), _decode_token(results.pagination_token)),
-        )
 
     def test_query_with_total(self):
         num_participants = 5
@@ -105,6 +120,9 @@ class ParticipantSummaryDaoTest(BaseTestCase):
     def _insert(self, participant, first_name=None, last_name=None):
         self.participant_dao.insert(participant)
         summary = self.participant_summary(participant)
+        summary.enrollmentStatus = EnrollmentStatus.INTERESTED
+        summary.enrollmentStatusV3_0 = EnrollmentStatusV30.PARTICIPANT
+        summary.enrollmentStatusV3_1 = EnrollmentStatusV31.PARTICIPANT
         if first_name:
             summary.firstName = first_name
         if last_name:
@@ -154,15 +172,11 @@ class ParticipantSummaryDaoTest(BaseTestCase):
         ps_1 = self.dao.get(1)
         ps_2 = self.dao.get(2)
         ps_3 = self.dao.get(3)
-        self.assert_results(self.no_filter_query, [ps_1, ps_2], _make_pagination_token(["Builder", "Bob", None, 2]))
+        self.assert_results(self.no_filter_query, [ps_1, ps_2])
         self.assert_results(self.one_filter_query, [ps_1])
         self.assert_no_results(self.two_filter_query)
-        self.assert_results(
-            self.ascending_biobank_id_query, [ps_2, ps_3], _make_pagination_token([3, "Caterpillar", "Chad", None, 3])
-        )
-        self.assert_results(
-            self.descending_biobank_id_query, [ps_1, ps_3], _make_pagination_token([3, "Caterpillar", "Chad", None, 3])
-        )
+        self.assert_results(self.ascending_biobank_id_query, [ps_2, ps_3])
+        self.assert_results(self.descending_biobank_id_query, [ps_1, ps_3])
 
         self.assert_results(
             _with_token(self.no_filter_query, _make_pagination_token(["Builder", "Bob", None, 2])), [ps_3]
@@ -199,39 +213,27 @@ class ParticipantSummaryDaoTest(BaseTestCase):
         ps_2.lastName = "Aardvark"
         ps_2.firstName = "Bob"
         ps_2.dateOfBirth = datetime.date(1978, 10, 10)
-        ps_2.enrollmentStatus = EnrollmentStatus.MEMBER
+        ps_2.enrollmentStatusV3_1 = EnrollmentStatusV31.PARTICIPANT_PLUS_EHR
         self.dao.update(ps_2)
 
         ps_3.lastName = "Jones"
         ps_3.firstName = "Bob"
         ps_3.dateOfBirth = datetime.date(1978, 10, 10)
         ps_3.hpoId = PITT_HPO_ID
-        ps_3.enrollmentStatus = EnrollmentStatus.MEMBER
+        ps_3.enrollmentStatusV3_1 = EnrollmentStatusV31.PARTICIPANT_PLUS_EHR
         self.dao.update(ps_3)
 
         ps_4.lastName = "Jones"
-        ps_4.enrollmentStatus = EnrollmentStatus.FULL_PARTICIPANT
+        ps_4.enrollmentStatusV3_1 = EnrollmentStatusV31.CORE_PARTICIPANT
         self.dao.update(ps_4)
 
-        self.assert_results(self.no_filter_query, [ps_2, ps_4], _make_pagination_token(["Jones", "Bob", None, 4]))
+        self.assert_results(self.no_filter_query, [ps_2, ps_4])
         self.assert_results(self.one_filter_query, [ps_1])
         self.assert_results(self.two_filter_query, [ps_1])
-        self.assert_results(
-            self.ascending_biobank_id_query, [ps_2, ps_4], _make_pagination_token([2, "Jones", "Bob", None, 4])
-        )
-        self.assert_results(
-            self.descending_biobank_id_query,
-            [ps_1, ps_3],
-            _make_pagination_token([3, "Jones", "Bob", datetime.date(1978, 10, 10), 3]),
-        )
-        self.assert_results(
-            self.hpo_id_order_query, [ps_2, ps_4], _make_pagination_token([0, "Jones", "Bob", None, 4])
-        )
-        self.assert_results(
-            self.enrollment_status_order_query,
-            [ps_1, ps_2],
-            _make_pagination_token(["MEMBER", "Aardvark", "Bob", datetime.date(1978, 10, 10), 2]),
-        )
+        self.assert_results(self.ascending_biobank_id_query, [ps_2, ps_4])
+        self.assert_results(self.descending_biobank_id_query,[ps_1, ps_3])
+        self.assert_results(self.hpo_id_order_query, [ps_2, ps_4])
+        self.assert_results(self.enrollment_status_order_query, [ps_1, ps_2])
 
         self.assert_results(
             _with_token(self.no_filter_query, _make_pagination_token(["Jones", "Bob", None, 4])), [ps_1, ps_3]
@@ -253,7 +255,7 @@ class ParticipantSummaryDaoTest(BaseTestCase):
         self.assert_results(
             _with_token(
                 self.enrollment_status_order_query,
-                _make_pagination_token(["MEMBER", "Aardvark", "Bob", datetime.date(1978, 10, 10), 2]),
+                _make_pagination_token(["PARTICIPANT_PLUS_EHR", "Aardvark", "Bob", datetime.date(1978, 10, 10), 2]),
             ),
             [ps_3, ps_4],
         )
@@ -430,70 +432,11 @@ class ParticipantSummaryDaoTest(BaseTestCase):
         participant_summary = self.dao.get(participant.participantId)
         self.assertEqual(confirmed_time, participant_summary.sampleStatus1ED10Time)
 
-    def test_calculate_enrollment_status(self):
-        self.assertEqual(
-            EnrollmentStatus.FULL_PARTICIPANT,
-            self.dao.calculate_enrollment_status(
-                True, NUM_BASELINE_PPI_MODULES, PhysicalMeasurementsStatus.COMPLETED, SampleStatus.RECEIVED,
-                ParticipantCohort.COHORT_1, QuestionnaireStatus.SUBMITTED_NO_CONSENT
-            ),
-        )
-        self.assertEqual(
-            EnrollmentStatus.MEMBER,
-            self.dao.calculate_enrollment_status(
-                True, NUM_BASELINE_PPI_MODULES - 1, PhysicalMeasurementsStatus.COMPLETED, SampleStatus.RECEIVED,
-                ParticipantCohort.COHORT_1, QuestionnaireStatus.SUBMITTED_NO_CONSENT
-            ),
-        )
-        self.assertEqual(
-            EnrollmentStatus.CORE_MINUS_PM,
-            self.dao.calculate_enrollment_status(
-                True, NUM_BASELINE_PPI_MODULES, PhysicalMeasurementsStatus.UNSET, SampleStatus.RECEIVED,
-                ParticipantCohort.COHORT_1, QuestionnaireStatus.SUBMITTED_NO_CONSENT
-            ),
-        )
-        self.assertEqual(
-            EnrollmentStatus.MEMBER,
-            self.dao.calculate_enrollment_status(
-                True, NUM_BASELINE_PPI_MODULES, PhysicalMeasurementsStatus.COMPLETED, SampleStatus.UNSET,
-                ParticipantCohort.COHORT_1, QuestionnaireStatus.SUBMITTED_NO_CONSENT
-            ),
-        )
-        self.assertEqual(
-            EnrollmentStatus.INTERESTED,
-            self.dao.calculate_enrollment_status(
-                False, NUM_BASELINE_PPI_MODULES, PhysicalMeasurementsStatus.COMPLETED, SampleStatus.RECEIVED,
-                ParticipantCohort.COHORT_1, QuestionnaireStatus.SUBMITTED_NO_CONSENT
-            ),
-        )
-        self.assertEqual(
-            EnrollmentStatus.MEMBER,
-            self.dao.calculate_enrollment_status(
-                True, NUM_BASELINE_PPI_MODULES, PhysicalMeasurementsStatus.COMPLETED, SampleStatus.RECEIVED,
-                ParticipantCohort.COHORT_3, QuestionnaireStatus.UNSET
-            ),
-            "Cohort 3 participants with all other requirements but without GROR consent"
-            "are not full participants [DA-1623]"
-        )
-        self.assertEqual(
-            EnrollmentStatus.FULL_PARTICIPANT,
-            self.dao.calculate_enrollment_status(
-                True, NUM_BASELINE_PPI_MODULES, PhysicalMeasurementsStatus.COMPLETED, SampleStatus.RECEIVED,
-                ParticipantCohort.COHORT_3, QuestionnaireStatus.SUBMITTED
-            ),
-            "Cohort 3 participants with GROR consent and all other requirements are full participants [DA-1623]"
-        )
-        self.assertEqual(
-            EnrollmentStatus.FULL_PARTICIPANT,
-            self.dao.calculate_enrollment_status(
-                True, NUM_BASELINE_PPI_MODULES, PhysicalMeasurementsStatus.COMPLETED, SampleStatus.RECEIVED,
-                ParticipantCohort.COHORT_2, QuestionnaireStatus.UNSET
-            ),
-            "Participants that are not in cohort 3 participants can be full participants without GROR consent [DA-1623]"
-        )
-
     def testUpdateEnrollmentStatus(self):
         ehr_consent_authored_time = datetime.datetime(2018, 3, 1)
+        self.mock_ehr_interest_ranges.return_value = [
+            DateRange(start=ehr_consent_authored_time)
+        ]
         summary = ParticipantSummary(
             participantId=1,
             biobankId=2,
@@ -501,12 +444,18 @@ class ParticipantSummaryDaoTest(BaseTestCase):
             consentForElectronicHealthRecords=QuestionnaireStatus.SUBMITTED,
             consentForElectronicHealthRecordsAuthored=ehr_consent_authored_time,
             enrollmentStatus=EnrollmentStatus.INTERESTED,
+            enrollmentStatusV3_0=EnrollmentStatusV30.PARTICIPANT,
+            enrollmentStatusV3_1=EnrollmentStatusV31.PARTICIPANT
         )
-        self.dao.update_enrollment_status(summary)
-        self.assertEqual(EnrollmentStatus.MEMBER, summary.enrollmentStatus)
-        self.assertEqual(ehr_consent_authored_time, summary.enrollmentStatusMemberTime)
+        self.dao.update_enrollment_status(summary, session=mock.MagicMock())
+        self.assertEqual(EnrollmentStatusV31.PARTICIPANT_PLUS_EHR, summary.enrollmentStatusV3_1)
+        self.assertEqual(ehr_consent_authored_time, summary.enrollmentStatusParticipantPlusEhrV3_1Time)
 
         sample_time = datetime.datetime(2019, 3, 1)
+
+        self.received_samples_mock.return_value = [
+            BiobankStoredSample(confirmed=sample_time)
+        ]
         summary = ParticipantSummary(
             participantId=1,
             biobankId=2,
@@ -515,66 +464,90 @@ class ParticipantSummaryDaoTest(BaseTestCase):
             consentForElectronicHealthRecordsAuthored=ehr_consent_authored_time,
             numCompletedBaselinePPIModules=NUM_BASELINE_PPI_MODULES,
             samplesToIsolateDNA=SampleStatus.RECEIVED,
-            physicalMeasurementsStatus=PhysicalMeasurementsStatus.UNSET,
+            questionnaireOnTheBasicsAuthored=ehr_consent_authored_time,
+            questionnaireOnLifestyleAuthored=ehr_consent_authored_time,
+            questionnaireOnOverallHealthAuthored=ehr_consent_authored_time,
+            clinicPhysicalMeasurementsStatus=PhysicalMeasurementsStatus.UNSET,
+            selfReportedPhysicalMeasurementsStatus=SelfReportedPhysicalMeasurementsStatus.UNSET,
             enrollmentStatus=EnrollmentStatus.MEMBER,
-            sampleStatus2ED10Time=sample_time
+            enrollmentStatusV3_0=EnrollmentStatusV30.PARTICIPANT,
+            enrollmentStatusV3_1=EnrollmentStatusV31.PARTICIPANT
         )
-        self.dao.update_enrollment_status(summary)
-        self.assertEqual(EnrollmentStatus.CORE_MINUS_PM, summary.enrollmentStatus)
-        self.assertEqual(sample_time, summary.enrollmentStatusCoreMinusPMTime)
+        self.dao.update_enrollment_status(summary, session=mock.MagicMock())
+        self.assertEqual(EnrollmentStatusV31.CORE_MINUS_PM, summary.enrollmentStatusV3_1)
+        self.assertEqual(sample_time, summary.enrollmentStatusCoreMinusPmV3_1Time)
 
-        summary.physicalMeasurementsStatus = PhysicalMeasurementsStatus.COMPLETED
-        self.dao.update_enrollment_status(summary)
-        self.assertEqual(EnrollmentStatus.FULL_PARTICIPANT, summary.enrollmentStatus)
-        self.assertEqual(sample_time, summary.enrollmentStatusCoreMinusPMTime)
-        # calculate again, enrollmentStatusCoreMinusPMTime should still there
-        self.dao.update_enrollment_status(summary)
-        self.assertEqual(sample_time, summary.enrollmentStatusCoreMinusPMTime)
+        summary.clinicPhysicalMeasurementsStatus = PhysicalMeasurementsStatus.COMPLETED
+        summary.clinicPhysicalMeasurementsFinalizedTime = datetime.datetime(2022, 7, 12)
+        self.dao.update_enrollment_status(summary, session=mock.MagicMock())
+        self.assertEqual(EnrollmentStatusV31.CORE_PARTICIPANT, summary.enrollmentStatusV3_1)
+        self.assertEqual(summary.clinicPhysicalMeasurementsFinalizedTime, summary.enrollmentStatusCoreV3_1Time)
+
+    def testUpdateEnrollmentStatusSelfReportedPm(self):
+        ehr_consent_authored_time = datetime.datetime(2018, 3, 1)
+        self.mock_ehr_interest_ranges.return_value = [
+            DateRange(start=ehr_consent_authored_time)
+        ]
+
+        sample_time = datetime.datetime(2019, 3, 1)
+        self.received_samples_mock.return_value = [
+            BiobankStoredSample(confirmed=sample_time)
+        ]
+        summary = ParticipantSummary(
+            participantId=1,
+            biobankId=2,
+            consentForStudyEnrollment=QuestionnaireStatus.SUBMITTED,
+            consentForElectronicHealthRecords=QuestionnaireStatus.SUBMITTED,
+            consentForElectronicHealthRecordsAuthored=ehr_consent_authored_time,
+            numCompletedBaselinePPIModules=NUM_BASELINE_PPI_MODULES,
+            samplesToIsolateDNA=SampleStatus.RECEIVED,
+            clinicPhysicalMeasurementsStatus=PhysicalMeasurementsStatus.UNSET,
+            selfReportedPhysicalMeasurementsStatus=SelfReportedPhysicalMeasurementsStatus.UNSET,
+            enrollmentStatus=EnrollmentStatus.MEMBER,
+            questionnaireOnTheBasicsAuthored=ehr_consent_authored_time,
+            questionnaireOnLifestyleAuthored=ehr_consent_authored_time,
+            questionnaireOnOverallHealthAuthored=ehr_consent_authored_time,
+            enrollmentStatusV3_0=EnrollmentStatusV30.PARTICIPANT,
+            enrollmentStatusV3_1=EnrollmentStatusV31.PARTICIPANT
+        )
+        self.dao.update_enrollment_status(summary, session=mock.MagicMock())
+        self.assertEqual(EnrollmentStatusV31.CORE_MINUS_PM, summary.enrollmentStatusV3_1)
+
+        summary.selfReportedPhysicalMeasurementsStatus = SelfReportedPhysicalMeasurementsStatus.COMPLETED
+        summary.selfReportedPhysicalMeasurementsAuthored = datetime.datetime(2019, 7, 12)
+        self.dao.update_enrollment_status(summary, session=mock.MagicMock())
+        self.assertEqual(EnrollmentStatusV31.CORE_PARTICIPANT, summary.enrollmentStatusV3_1)
 
     def testDowngradeCoreMinusPm(self):
-        ehr_consent_authored_time = datetime.datetime(2018, 3, 1)
+        """Check that a participant that has achieved CORE_MINUS_PM status isn't downgraded from it"""
         sample_time = datetime.datetime(2019, 3, 1)
-        summary = ParticipantSummary(
-            participantId=1,
-            biobankId=2,
-            consentForStudyEnrollment=QuestionnaireStatus.SUBMITTED,
-            consentForElectronicHealthRecords=QuestionnaireStatus.SUBMITTED,
-            consentForElectronicHealthRecordsAuthored=ehr_consent_authored_time,
-            numCompletedBaselinePPIModules=NUM_BASELINE_PPI_MODULES,
-            samplesToIsolateDNA=SampleStatus.RECEIVED,
-            physicalMeasurementsStatus=PhysicalMeasurementsStatus.UNSET,
-            enrollmentStatus=EnrollmentStatus.MEMBER,
-            sampleStatus2ED10Time=sample_time
-        )
-        self.dao.update_enrollment_status(summary)
-        self.assertEqual(EnrollmentStatus.CORE_MINUS_PM, summary.enrollmentStatus)
-        self.assertEqual(sample_time, summary.enrollmentStatusCoreMinusPMTime)
+        self.mock_ehr_interest_ranges.return_value = []
 
         summary = ParticipantSummary(
             participantId=1,
             biobankId=2,
             consentForStudyEnrollment=QuestionnaireStatus.SUBMITTED,
-            consentForElectronicHealthRecords=QuestionnaireStatus.SUBMITTED_NO_CONSENT,
-            consentForElectronicHealthRecordsAuthored=ehr_consent_authored_time,
             numCompletedBaselinePPIModules=NUM_BASELINE_PPI_MODULES,
             samplesToIsolateDNA=SampleStatus.RECEIVED,
-            physicalMeasurementsStatus=PhysicalMeasurementsStatus.UNSET,
+            clinicPhysicalMeasurementsStatus=PhysicalMeasurementsStatus.UNSET,
+            sampleStatus2ED10Time=sample_time,
+            enrollmentStatusCoreMinusPMTime=sample_time,
             enrollmentStatus=EnrollmentStatus.CORE_MINUS_PM,
-            sampleStatus2ED10Time=sample_time
+            enrollmentStatusV3_0=EnrollmentStatusV30.CORE_MINUS_PM,
+            enrollmentStatusV3_1=EnrollmentStatusV31.CORE_MINUS_PM
         )
-        self.dao.update_enrollment_status(summary)
-        self.assertEqual(EnrollmentStatus.CORE_MINUS_PM, summary.enrollmentStatus)
-        self.assertEqual(sample_time, summary.enrollmentStatusCoreMinusPMTime)
+        self.dao.update_enrollment_status(summary, session=mock.MagicMock())
+        self.assertEqual(EnrollmentStatusV31.CORE_MINUS_PM, summary.enrollmentStatusV3_1)
 
     def testCoreStatusRemains(self):
-        member_time = datetime.datetime(2020, 6, 1)
+        status_time = datetime.datetime(2020, 6, 1)
         participant_summary = self.data_generator._participant_summary_with_defaults(
-            enrollmentStatus=EnrollmentStatus.FULL_PARTICIPANT,
-            enrollmentStatusMemberTime=member_time
+            enrollmentStatusV3_1=EnrollmentStatusV31.CORE_PARTICIPANT,
+            enrollmentStatusCoreV3_1Time=status_time
         )
-        self.dao.update_enrollment_status(participant_summary)
-        self.assertEqual(EnrollmentStatus.FULL_PARTICIPANT, participant_summary.enrollmentStatus)
-        self.assertEqual(member_time, participant_summary.enrollmentStatusMemberTime)
+        self.dao.update_enrollment_status(participant_summary, session=mock.MagicMock())
+        self.assertEqual(EnrollmentStatusV31.CORE_PARTICIPANT, participant_summary.enrollmentStatusV3_1)
+        self.assertEqual(status_time, participant_summary.enrollmentStatusCoreV3_1Time)
 
     def testUpdateEnrollmentStatusLastModified(self):
         """DA-631: enrollment_status update should update last_modified."""
@@ -585,23 +558,29 @@ class ParticipantSummaryDaoTest(BaseTestCase):
 
         def reset_summary():
             # change summary so enrollment status will be changed from INTERESTED to MEMBER.
-            summary.enrollmentStatus = EnrollmentStatus.INTERESTED
+            summary.enrollmentStatusV3_1 = EnrollmentStatusV31.PARTICIPANT
             summary.lastModified = test_dt
             summary.consentForStudyEnrollment = QuestionnaireStatus.SUBMITTED
             summary.consentForElectronicHealthRecords = QuestionnaireStatus.SUBMITTED
-            summary.physicalMeasurementsStatus = PhysicalMeasurementsStatus.COMPLETED
+            summary.clinicPhysicalMeasurementsStatus = PhysicalMeasurementsStatus.COMPLETED
             summary.samplesToIsolateDNA = SampleStatus.RECEIVED
             self.dao.update(summary)
 
         ## Test Step 1: Validate update_from_biobank_stored_samples() changes lastModified.
+        self.mock_ehr_interest_ranges.return_value = [
+            DateRange(start=datetime.datetime(2018, 10, 3))
+        ]
         reset_summary()
 
         # Update and reload summary record
-        self.dao.update_from_biobank_stored_samples(participant_id=participant.participantId)
+        self.dao.update_from_biobank_stored_samples(
+            participant_id=participant.participantId,
+            biobank_ids=[participant.biobankId]
+        )
         summary = self.dao.get(participant.participantId)
 
         # Test that status has changed and lastModified is also different
-        self.assertEqual(EnrollmentStatus.MEMBER, summary.enrollmentStatus)
+        self.assertEqual(EnrollmentStatusV31.PARTICIPANT_PLUS_EHR, summary.enrollmentStatusV3_1)
         self.assertNotEqual(test_dt, summary.lastModified)
 
         ## Test Step 2: Validate that update_enrollment_status() changes the lastModified property.
@@ -611,9 +590,9 @@ class ParticipantSummaryDaoTest(BaseTestCase):
         self.assertEqual(test_dt, summary.lastModified)
 
         # update_enrollment_status() does not touch the db, it only modifies object properties.
-        self.dao.update_enrollment_status(summary)
+        self.dao.update_enrollment_status(summary, session=mock.MagicMock())
 
-        self.assertEqual(EnrollmentStatus.MEMBER, summary.enrollmentStatus)
+        self.assertEqual(EnrollmentStatusV31.PARTICIPANT_PLUS_EHR, summary.enrollmentStatusV3_1)
         self.assertNotEqual(test_dt, summary.lastModified)
 
     def testNumberDistinctVisitsCounts(self):
@@ -1040,6 +1019,101 @@ class ParticipantSummaryDaoTest(BaseTestCase):
         self.assertIsNotNone(participant_summary)
         self.assertEqual(pid, participant_summary.participantId)
 
+    def test_create_synthetic_pm_fields(self):
+        summary_1 = ParticipantSummary(
+            participantId=1
+        )
+        results = self.dao.to_client_json(summary_1)
+        self.assertEqual(results["physicalMeasurementsStatus"], "UNSET")
+        self.assertEqual(results["clinicPhysicalMeasurementsStatus"], "UNSET")
+        self.assertEqual(results["selfReportedPhysicalMeasurementsStatus"], "UNSET")
+        self.assertEqual(results["physicalMeasurementsCollectType"], "UNSET")
+
+        summary_2 = ParticipantSummary(
+            participantId=2,
+            clinicPhysicalMeasurementsStatus=PhysicalMeasurementsStatus.COMPLETED,
+            clinicPhysicalMeasurementsFinalizedTime=TIME_1
+        )
+        results = self.dao.to_client_json(summary_2)
+        self.assertEqual(results["physicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(results["clinicPhysicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(results["selfReportedPhysicalMeasurementsStatus"], "UNSET")
+        self.assertEqual(results["physicalMeasurementsFinalizedTime"], TIME_1.isoformat())
+        self.assertEqual(results["physicalMeasurementsCollectType"], "SITE")
+
+        summary_3 = ParticipantSummary(
+            participantId=3,
+            selfReportedPhysicalMeasurementsStatus=PhysicalMeasurementsStatus.COMPLETED,
+            selfReportedPhysicalMeasurementsAuthored=TIME_2
+        )
+        results = self.dao.to_client_json(summary_3)
+        self.assertEqual(results["physicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(results["clinicPhysicalMeasurementsStatus"], "UNSET")
+        self.assertEqual(results["selfReportedPhysicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(results["physicalMeasurementsFinalizedTime"], TIME_2.isoformat())
+        self.assertEqual(results["physicalMeasurementsCollectType"], "SELF_REPORTED")
+
+        summary_4 = ParticipantSummary(
+            participantId=4,
+            selfReportedPhysicalMeasurementsStatus=PhysicalMeasurementsStatus.COMPLETED,
+            selfReportedPhysicalMeasurementsAuthored=TIME_2,
+            clinicPhysicalMeasurementsStatus=PhysicalMeasurementsStatus.COMPLETED,
+            clinicPhysicalMeasurementsFinalizedTime=TIME_1
+        )
+        results = self.dao.to_client_json(summary_4)
+        self.assertEqual(results["physicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(results["clinicPhysicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(results["selfReportedPhysicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(results["physicalMeasurementsFinalizedTime"], TIME_2.isoformat())
+        self.assertEqual(results["physicalMeasurementsCollectType"], "SELF_REPORTED")
+
+        summary_5 = ParticipantSummary(
+            participantId=5,
+            selfReportedPhysicalMeasurementsStatus=PhysicalMeasurementsStatus.COMPLETED,
+            selfReportedPhysicalMeasurementsAuthored=TIME_4,
+            clinicPhysicalMeasurementsStatus=PhysicalMeasurementsStatus.COMPLETED,
+            clinicPhysicalMeasurementsFinalizedTime=TIME_3
+        )
+        results = self.dao.to_client_json(summary_5)
+        self.assertEqual(results["physicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(results["clinicPhysicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(results["selfReportedPhysicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(results["physicalMeasurementsFinalizedTime"], TIME_3.isoformat())
+        self.assertEqual(results["physicalMeasurementsCollectType"], "SITE")
+
+    @mock.patch('rdr_service.logic.enrollment_info.EnrollmentCalculation.get_enrollment_info')
+    @mock.patch('rdr_service.dao.participant_summary_dao.BiobankStoredSampleDao')
+    def test_status_calculation_uses_earliest_dna_time(self, sample_dao_mock, enrollment_calculation_mock):
+        """
+        The enrollment status calculation code should be provided with the earliest sample collection time,
+        even if multiple samples of the same type have been collected
+        """
+
+        enrollment_calculation_mock.return_value = EnrollmentInfo(
+            version_legacy_status=EnrollmentStatus.INTERESTED,
+            version_3_0_status=EnrollmentStatusV30.PARTICIPANT,
+            version_3_1_status=EnrollmentStatusV31.PARTICIPANT
+        )
+
+        earliest_sample_time = datetime.datetime(2022, 1, 27)
+        later_sample_time = datetime.datetime(2022, 3, 1)
+        summary = ParticipantSummary(
+            enrollmentStatus=EnrollmentStatus.INTERESTED,
+            samplesToIsolateDNA=SampleStatus.RECEIVED,
+            enrollmentStatusV3_0=EnrollmentStatusV30.PARTICIPANT,
+            enrollmentStatusV3_1=EnrollmentStatusV31.PARTICIPANT,
+            sampleStatus1SALTime=later_sample_time
+        )
+        sample_dao_mock.load_confirmed_dna_samples.return_value = [
+            BiobankStoredSample(test='1SAL2', confirmed=earliest_sample_time),
+            BiobankStoredSample(test='1SAL2', confirmed=later_sample_time)
+        ]
+
+        self.dao.update_enrollment_status(summary=summary, session=mock.MagicMock())
+
+        participant_info = enrollment_calculation_mock.call_args[0][0]
+        self.assertEqual(earliest_sample_time, participant_info.earliest_biobank_received_dna_time)
+
     def test_parse_enums_from_resource(self):
         resource = {
             "withdrawalStatus": "NO_USE",
@@ -1055,6 +1129,69 @@ class ParticipantSummaryDaoTest(BaseTestCase):
         all_enums = all([key for key in resource.keys()
                          if type(key).__class__.__name__ == '_EnumClass'])
         self.assertTrue(all_enums)
+
+    def test_profile_update(self):
+        participant_id = self.data_generator.create_database_participant_summary(
+            firstName='Foo',
+            middleName='Mid',
+            lastName='Bar',
+            phoneNumber='1234567890',
+            email='test@example.com',
+            dateOfBirth=datetime.date(2000, 1, 1),
+            streetAddress='123 Main',
+            streetAddress2='Apt B',
+            city='New City',
+            zipCode='1234',
+            primaryLanguage='en'
+        ).participantId
+
+        ParticipantSummaryDao.update_profile_data(
+            participant_id=participant_id,
+            first_name='Foo2',
+            middle_name='Mid2',
+            last_name='Bar2',
+            phone_number='0987654321',
+            email='another@example.org',
+            birthdate=datetime.date(2012, 2, 3),
+            address_line1='456 Way',
+            address_line2='Unit 1',
+            address_city='Other City',
+            address_zip_code='54321',
+            preferred_language='es'
+        )
+
+        summary = self.session.query(ParticipantSummary).filter(
+            ParticipantSummary.participantId == participant_id
+        ).one()
+        self.assertEqual('Foo2', summary.firstName)
+        self.assertEqual('Mid2', summary.middleName)
+        self.assertEqual('Bar2', summary.lastName)
+        self.assertEqual('0987654321', summary.phoneNumber)
+        self.assertEqual('another@example.org', summary.email)
+        self.assertEqual(datetime.date(2012, 2, 3), summary.dateOfBirth)
+        self.assertEqual('456 Way', summary.streetAddress)
+        self.assertEqual('Unit 1', summary.streetAddress2)
+        self.assertEqual('Other City', summary.city)
+        self.assertEqual('54321', summary.zipCode)
+        self.assertEqual('es', summary.primaryLanguage)
+
+    def test_state_profile_update(self):
+        ca_state_code = self.data_generator.create_database_code(value='PIIState_CA')
+        or_state_code = self.data_generator.create_database_code(value='PIIState_OR')
+
+        participant_id = self.data_generator.create_database_participant_summary(
+            stateId=ca_state_code.codeId
+        ).participantId
+
+        ParticipantSummaryDao.update_profile_data(
+            participant_id=participant_id,
+            address_state='OR'
+        )
+
+        summary = self.session.query(ParticipantSummary).filter(
+            ParticipantSummary.participantId == participant_id
+        ).one()
+        self.assertEqual(or_state_code.codeId, summary.stateId)
 
     @staticmethod
     def _get_amended_info(order):

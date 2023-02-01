@@ -44,15 +44,17 @@ from rdr_service.model.site import Site
 from rdr_service.model.questionnaire import QuestionnaireConcept, QuestionnaireHistory, QuestionnaireQuestion
 from rdr_service.model.questionnaire_response import QuestionnaireResponse, QuestionnaireResponseAnswer, \
     QuestionnaireResponseClassificationType
-from rdr_service.participant_enums import EnrollmentStatusV2, WithdrawalStatus, WithdrawalReason, SuspensionStatus, \
-    SampleStatus, BiobankOrderStatus, PatientStatusFlag, ParticipantCohortPilotFlag, EhrStatus, DeceasedStatus, \
-    DeceasedReportStatus, QuestionnaireResponseStatus, OrderStatus, WithdrawalAIANCeremonyStatus, \
-    TEST_HPO_NAME, TEST_LOGIN_PHONE_NUMBER_PREFIX, SampleCollectionMethod
+from rdr_service.participant_enums import (EnrollmentStatusV2, WithdrawalStatus, WithdrawalReason,
+                                           SuspensionStatus, DeceasedStatus, DeceasedReportStatus, SampleStatus,
+                                           BiobankOrderStatus, PatientStatusFlag, ParticipantCohortPilotFlag, EhrStatus,
+                                           QuestionnaireResponseStatus, OrderStatus, WithdrawalAIANCeremonyStatus,
+                                           TEST_HPO_NAME, TEST_LOGIN_PHONE_NUMBER_PREFIX, SampleCollectionMethod)
 from rdr_service.resource import generators, schemas
 from rdr_service.resource.calculators import EnrollmentStatusCalculator, ParticipantUBRCalculator as ubr
 from rdr_service.resource.constants import SchemaID, ActivityGroupEnum, ParticipantEventEnum, ConsentCohortEnum, \
     PDREnrollmentStatusEnum
 from rdr_service.resource.schemas.participant import StreetAddressTypeEnum, BIOBANK_UNIQUE_TEST_IDS
+from rdr_service.resource.calculators.participant_enrollment_status_v30 import EnrollmentStatusCalculator_v3_0
 
 
 class ModuleLookupEnum(enum.Enum):
@@ -76,7 +78,12 @@ _consent_module_question_map = {
     'cope_feb': 'section_participation',
     'GeneticAncestry': 'GeneticAncestry_ConsentAncestryTraits',
     'covid_19_serology_results': 'covid_19_serology_results_decision',
-    'wear_consent': 'resultsconsent_wear'
+    'wear_consent': 'resultsconsent_wear',
+    # Reconsent modules for cases where participant may not have initially completed the expected VA vs. Non-VA version
+    'vaprimaryreconsent_c1_2': 'vaprimaryreconsent_c1_2_agree',
+    'vaprimaryreconsent_c3': 'vaprimaryreconsent_c3_agree',
+    'vaehrreconsent': 'vaehrreconsent_agree',
+    'nonvaprimaryreconsent': 'nonvaprimaryreconsent_agree'
 }
 
 # _consent_expired_question_map, for expired consents. { module: question code string }
@@ -112,6 +119,10 @@ _consent_answer_status_map = {
     'Decision_No': BQModuleStatusEnum.SUBMITTED_NO_CONSENT,
     'WEAR_Yes': BQModuleStatusEnum.SUBMITTED,
     'WEAR_No': BQModuleStatusEnum.SUBMITTED_NO_CONSENT,
+    # VA/Non-VA reconsent modules consent answer options (note:  agree_no is defined but may not be transmitted to RDR,
+    # participants who decline reconsent may be updated to withdrawn status by PTSC instead)
+    'agree_yes': BQModuleStatusEnum.SUBMITTED,
+    'agree_no': BQModuleStatusEnum.SUBMITTED_NO_CONSENT
 }
 
 # PDR-252:  When RDR starts accepting QuestionnaireResponse payloads for withdrawal screens, AIAN participants
@@ -173,10 +184,11 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
     _baseline_sample_test_codes = config.getSettingList('baseline_sample_test_codes')
     _dna_sample_test_codes = config.getSettingList('dna_sample_test_codes')
 
-    def make_resource(self, p_id):
+    def make_resource(self, p_id, qc_mode=False):
         """
         Build a Participant Summary Resource object for the given participant id.
         :param p_id: Participant ID
+        :param qc_mode:  If True, the resource record will be generated and returned but will not be saved to the DB
         :return: ResourceDataObject object
         """
         if not self.ro_dao:
@@ -215,7 +227,7 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
 
             # DA-2611 related: Closes a gap where primary consent metrics records in PDR have some stale errors for
             # invalid DOB/invalid age at consent
-            if summary.get('date_of_birth', None):
+            if summary.get('date_of_birth', None) and not qc_mode:
                 self.generate_primary_consent_metrics(p_id, ro_session)
 
             return generators.ResourceRecordSet(schemas.ParticipantSchema, summary)
@@ -410,7 +422,8 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
         pairing_history = None
         query = ro_session.query(ParticipantHistory.lastModified, ParticipantHistory.hpoId, HPO.name.label('hpo'),
                                    ParticipantHistory.organizationId, Organization.externalId.label('organization'),
-                                   ParticipantHistory.siteId, Site.googleGroup.label('site')). \
+                                   ParticipantHistory.siteId, Site.googleGroup.label('site'),
+                                   ParticipantHistory.version). \
                 outerjoin(HPO, HPO.hpoId == ParticipantHistory.hpoId).\
                 outerjoin(Organization, Organization.organizationId == ParticipantHistory.organizationId).\
                 outerjoin(Site, Site.siteId == ParticipantHistory.siteId).\
@@ -427,7 +440,8 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
                     'organization': item.organization,
                     'organization_id': item.organizationId,
                     'site': item.site,
-                    'site_id': item.siteId
+                    'site_id': item.siteId,
+                    'version': item.version
                 })
 
         data['pairing_history'] = pairing_history
@@ -462,17 +476,51 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
         # Goal is to eliminate dependencies on participant_summary, which may go away someday.
         # Long term solution may mean creating a participant_profile table for these outlier fields that are managed
         # outside of the RDR API, and query that table instead.
-        data = {}
-        ps = ro_session.query(ParticipantSummary.ehrStatus, ParticipantSummary.ehrReceiptTime,
+        ps = ro_session.query(ParticipantSummary.ehrStatus,
+                              ParticipantSummary.ehrReceiptTime,
                               ParticipantSummary.ehrUpdateTime,
+                              ParticipantSummary.isEhrDataAvailable,
+                              ParticipantSummary.consentForStudyEnrollmentAuthored,
+                              ParticipantSummary.enrollmentStatus,  # legacy status mapped to EnrollmentStatusV2 in PDR
+                              ParticipantSummary.enrollmentStatusMemberTime,
+                              ParticipantSummary.enrollmentStatusCoreMinusPMTime,
                               ParticipantSummary.enrollmentStatusCoreOrderedSampleTime,
                               ParticipantSummary.enrollmentStatusCoreStoredSampleTime,
-                              ParticipantSummary.isEhrDataAvailable) \
-            .filter(ParticipantSummary.participantId == p_id).first()
+                              ParticipantSummary.enrollmentStatusV3_0,
+                              ParticipantSummary.enrollmentStatusParticipantV3_0Time,
+                              ParticipantSummary.enrollmentStatusParticipantPlusEhrV3_0Time,
+                              ParticipantSummary.enrollmentStatusPmbEligibleV3_0Time,
+                              ParticipantSummary.enrollmentStatusCoreMinusPmV3_0Time,
+                              ParticipantSummary.enrollmentStatusCoreV3_0Time,
+                              ParticipantSummary.enrollmentStatusV3_1,
+                              ParticipantSummary.enrollmentStatusParticipantV3_1Time,
+                              ParticipantSummary.enrollmentStatusParticipantPlusEhrV3_1Time,
+                              ParticipantSummary.enrollmentStatusParticipantPlusBasicsV3_1Time,
+                              ParticipantSummary.enrollmentStatusCoreMinusPmV3_1Time,
+                              ParticipantSummary.enrollmentStatusCoreV3_1Time,
+                              ParticipantSummary.enrollmentStatusParticipantPlusBaselineV3_1Time,
+                              ParticipantSummary.healthDataStreamSharingStatusV3_1,
+                              ParticipantSummary.healthDataStreamSharingStatusV3_1Time
+        ).select_from(
+            Participant
+        ).join(
+            ParticipantSummary, isouter=True
+        ).filter(
+            Participant.participantId == p_id
+        ).first()
 
-        if not ps:
+        # For PDR, start with REGISTERED as the default enrollment status (all versions).  This identifies participants
+        # who have not yet consented / should not have a participant_summary record
+        data = {}
+        # TODO:  add enrollment_status / enrollment_status_id after Goal 1 QC (move from _calculate_enrollment_status)
+        for key in ['enrollment_status_v2', 'enrollment_status_v3_0', 'enrollment_status_v3_1']:
+            data[key] = str(EnrollmentStatusV2.REGISTERED)
+            data[key + '_id'] = int(EnrollmentStatusV2.REGISTERED)
+
+        if not ps.enrollmentStatus:
             logging.debug(f'No participant_summary record found for {p_id}')
         else:
+            enrollment_v2 = EnrollmentStatusV2(int(ps.enrollmentStatus))
             # SqlAlchemy may return None for our zero-based NOT_PRESENT EhrStatus Enum, so map None to NOT_PRESENT
             # See rdr_service.model.utils Enum decorator class
             ehr_status = EhrStatus.NOT_PRESENT if ps.ehrStatus is None else ps.ehrStatus
@@ -488,7 +536,33 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
                 # (and ehr_status_id) fields for PDR backwards compatibility
                 'was_ehr_data_available': int(ehr_status),
                 # Brand new field as of RDR 1.83.1/DA-1781; convert boolean to integer for our BQ data dict
-                'is_ehr_data_available': int(ps.isEhrDataAvailable)
+                'is_ehr_data_available': int(ps.isEhrDataAvailable),
+                # TODO:  Move out of _calculate_enrollment_status() after Goal 1 / PEO QC
+                # 'enrollment_status': str(enrollment_v2)
+                # 'enrollment_status_id': int(enrollment_v2)
+                # 'enrollment_member': ps.enrollmentStatusMemberTime,
+                #'enrollment_core_minus_pm': ps.enrollmentStatusCoreMinusPMTime,
+                'enrollment_status_legacy_v2': str(enrollment_v2),     # temporary, for Goal 1 QC
+                'enrollment_status_legacy_v2_id': int(enrollment_v2),  # temporary, for Goal 1 QC
+                'enrollment_status_v3_0': str(ps.enrollmentStatusV3_0),
+                'enrollment_status_v3_0_id': int(ps.enrollmentStatusV3_0),
+                'enrollment_status_v3_0_participant_time': ps.enrollmentStatusParticipantV3_0Time,
+                'enrollment_status_v3_0_participant_plus_ehr_time': ps.enrollmentStatusParticipantPlusEhrV3_0Time,
+                'enrollment_status_v3_0_pmb_eligible_time': ps.enrollmentStatusPmbEligibleV3_0Time,
+                'enrollment_status_v3_0_core_minus_pm_time': ps.enrollmentStatusCoreMinusPmV3_0Time,
+                'enrollment_status_v3_0_core_time': ps.enrollmentStatusCoreV3_0Time,
+                'enrollment_status_v3_1': str(ps.enrollmentStatusV3_1),
+                'enrollment_status_v3_1_id': int(ps.enrollmentStatusV3_1),
+                'enrollment_status_v3_1_participant_time': ps.enrollmentStatusParticipantV3_1Time,
+                'enrollment_status_v3_1_participant_plus_ehr_time': ps.enrollmentStatusParticipantPlusEhrV3_1Time,
+                'enrollment_status_v3_1_participant_plus_basics_time': ps.enrollmentStatusParticipantPlusBasicsV3_1Time,
+                'enrollment_status_v3_1_core_minus_pm_time': ps.enrollmentStatusCoreMinusPmV3_1Time,
+                'enrollment_status_v3_1_core_time': ps.enrollmentStatusCoreV3_1Time,
+                'enrollment_status_v3_1_participant_plus_baseline_time': \
+                    ps.enrollmentStatusParticipantPlusBaselineV3_1Time,
+                'health_datastream_sharing_status_v3_1': str(ps.healthDataStreamSharingStatusV3_1),
+                'health_datastream_sharing_status_v3_1_id': int(ps.healthDataStreamSharingStatusV3_1),
+                'health_datastream_sharing_status_v3_1_time': ps.healthDataStreamSharingStatusV3_1Time
             }
             # Note:  None of the columns in the participant_ehr_receipt table are nullable
             pehr_results = ro_session.query(ParticipantEhrReceipt.id,
@@ -649,6 +723,12 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
                     continue
                 consent_added = False
                 module_name = self._lookup_code_value(row.codeId, ro_session)
+
+                # DA-3076 Workaround:  Exclude IN_PROGRESS (classification type PARTIAL) EHR responses sent in error
+                # to RDR, until RDR cleans these by flagging as invalid/DUPLICATE
+                if (module_name == 'EHRConsentPII'
+                        and row.classificationType == QuestionnaireResponseClassificationType.PARTIAL):
+                    continue
                 # Start with a default submittal status.  May be updated if this is a consent module with a specific
                 # consent question/answer that determines module submittal status
                 module_status = BQModuleStatusEnum.SUBMITTED
@@ -911,6 +991,11 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
         :return:
         """
 
+        # PDR-1432: Workaround for an edge case where HPRO created an "orphaned" biobank order that should be ignored
+        # TODO: When DA-3150 is implemented, need to adjust the biobank table queries in this method to filter on
+        # ignore flags, as appropriate
+        ignore_biobank_orders = ['WEBF77CR2BX5', ]
+
         def _get_stored_sample_row(stored_samples, ordered_sample):
             """
             Search a list of biobank_stored_sample rows to find a match to the biobank_ordered_sample record
@@ -1021,8 +1106,8 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
         _biobank_stored_samples_sql = """
             select
                 (select p.participant_id from participant p where p.biobank_id = bss.biobank_id) as participant_id,
-                (select distinct boi.biobank_order_id from
-                   biobank_order_identifier boi where boi.`value` = bss.biobank_order_identifier
+                (select distinct boi.biobank_order_id from biobank_order_identifier boi
+                   where boi.`value` = bss.biobank_order_identifier and boi.biobank_order_id not in :ignore_orders
                 ) as biobank_order_id,
                 bss.*
             from biobank_stored_sample bss
@@ -1033,9 +1118,11 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
         data = {}
         orders = list()
         activity = list()
-        # Find all biobank orders associated with this participant
+        # Find all biobank orders associated with this participant.  PDR-1432 WORKAROUND:  Certain biobank orders may
+        # be excluded from the list due to rare occurrences of "orphaned" orders created by HPRO
+        # TODO:  Update to use a new ignore column as filter when implemented for DA-3150
         cursor = ro_session.execute(_biobank_orders_sql, {'p_id': p_id})
-        biobank_orders = [r for r in cursor]
+        biobank_orders = [r for r in cursor if r.biobank_order_id not in ignore_biobank_orders]
         # Create a unique identifier for each biobank order. This uid must be repeatable, so we sort by 'created'.
         # This unique biobank order id will be used as the prefix of the unique id for each biobank sample record.
         # Note: This is why every database table should have an 'id' integer field as the primary key, so we don't
@@ -1049,7 +1136,8 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
 
         # Find stored samples associated with this participant. For any stored samples for which there
         # is no known biobank order, create a separate list that will be consolidated into a "pseudo" order record
-        cursor = ro_session.execute(_biobank_stored_samples_sql, {'bb_id': p_bb_id})
+        cursor = ro_session.execute(_biobank_stored_samples_sql, {'bb_id': p_bb_id,
+                                                                  'ignore_orders': ignore_biobank_orders})
         bss_results = [r for r in cursor]
         bss_missing_orders = list(filter(lambda r: r.biobank_order_id is None, bss_results))
 
@@ -1251,6 +1339,8 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
 
         return data
 
+    # Leaving PDR calculations for EnrollmentStatusV2 enabled temporarily during Goal 1 transition, for QC/debugging
+    # See _prep_participant_profile() for integration of RDR-calculated fields into the PDR participant_data record
     def _calculate_enrollment_status(self, summary, p_id):
         """
         Calculate the participant's enrollment status
@@ -1263,6 +1353,9 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
         # Make sure activity has been sorted by timestamp before we run the enrollment status calculator.
         esc = EnrollmentStatusCalculator()
         esc.run(activity)
+
+        esc_v3_0 = EnrollmentStatusCalculator_v3_0()
+        esc_v3_0.run(activity)
 
         # Support depreciated enrollment status field values.
         status = EnrollmentStatusV2.REGISTERED
@@ -1284,12 +1377,21 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
             'enrl_participant_plus_ehr_time': esc.participant_plus_ehr_time,
             'enrl_core_participant_minus_pm_time': esc.core_participant_minus_pm_time,
             'enrl_core_participant_time': esc.core_participant_time,
-            # -- Depreciated fields --
+            # Version 3.0 Enrollment Calculations
+            'enrl_v3_0_status': esc_v3_0.status.name,
+            'enrl_v3_0_status_id': esc_v3_0.status.value,
+            'enrl_v3_0_registered_time': esc_v3_0.registered_time,
+            'enrl_v3_0_participant_time': esc_v3_0.participant_time,
+            'enrl_v3_0_participant_plus_ehr_time': esc_v3_0.participant_plus_ehr_time,
+            'enrl_v3_0_participant_pmb_eligible_time': esc_v3_0.participant_pmb_eligible_time,
+            'enrl_v3_0_core_participant_minus_pm_time': esc_v3_0.core_participant_minus_pm_time,
+            'enrl_v3_0_core_participant_time': esc_v3_0.core_participant_time,
+
+            # TODO: PDR-calculated fields that can be deprecated / moved to _prep_participant_profile after goal 1 QC
             'enrollment_status': str(status),
             'enrollment_status_id': int(status),
             'enrollment_member': esc.participant_time,
             'enrollment_core_minus_pm': esc.core_participant_minus_pm_time
-            # -- End depreciated fields --
         }
 
         # Calculate age at consent.
@@ -1625,6 +1727,8 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
         :return: dict
         """
         data = dict()
+        basics_qnan, lfs_qnan = None, None
+        ubr_disability_responses = []
         # Return if participant has not yet submitted a primary consent response.
         if summary.get('enrl_status_id', 0) < PDREnrollmentStatusEnum.Participant:
             return data
@@ -1646,35 +1750,55 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
         # ubr_overall - This should be calculated here in case there is no TheBasics response available.
         data['ubr_overall'] = ubr.ubr_overall(data)
 
-        #### TheBasics UBR calculations.
+        #### TheBasics / lfs UBR calculations.
         # Note: Due to PDR-484 we can't rely on the summary having a record for each valid submission so we
         #       are going to do our own query to get the first TheBasics submission after consent.
         # As of RDR 1.113.1, can filter on new classification_type to filter on full (COMPLETE) TheBasics surveys
-        qr_id = self.find_questionnaire_response_id(
+        basics_qr_id = self.find_questionnaire_response_id(
             ro_session, p_id, "TheBasics", QuestionnaireResponseClassificationType.COMPLETE, ModuleLookupEnum.FIRST)
-        if not qr_id:
-            return data
+        # PDR-1438: lfs survey released in 9/2022 for participants whose early version of TheBasics may not have
+        # included physical disability questions.  lfs presents the same 6 questions (e.g., Disability_Blind) and
+        # needs to be factored into UBR disability calculation
+        lfs_qr_id = self.find_questionnaire_response_id(
+            ro_session, p_id, "lfs", QuestionnaireResponseClassificationType.COMPLETE, ModuleLookupEnum.FIRST)
 
-        qnan = self.get_module_answers(self.ro_dao, 'TheBasics', p_id=p_id, qr_id=qr_id)
+        if basics_qr_id:
+            basics_qnan = self.get_module_answers(self.ro_dao, 'TheBasics', p_id=p_id, qr_id=basics_qr_id)
+        if lfs_qr_id:
+            lfs_qnan = self.get_module_answers(self.ro_dao, 'lfs', p_id=p_id, qr_id=lfs_qr_id)
 
-        # ubr_sex
-        data['ubr_sex'] = ubr.ubr_sex(qnan.get('BiologicalSexAtBirth_SexAtBirth', None))
-        # ubr_sexual_orientation
-        data['ubr_sexual_orientation'] = ubr.ubr_sexual_orientation(qnan.get('TheBasics_SexualOrientation', None))
-        # ubr_gender_identity
-        data['ubr_gender_identity'] = ubr.ubr_gender_identity(qnan.get('BiologicalSexAtBirth_SexAtBirth', None),
-            qnan.get('Gender_GenderIdentity', None), qnan.get('Gender_CloserGenderDescription', None))
-        # ubr_sexual_gender_minority
-        data['ubr_sexual_gender_minority'] = \
-            ubr.ubr_sexual_gender_minority(data['ubr_sexual_orientation'], data['ubr_gender_identity'])
-        # ubr_ethnicity
-        data['ubr_ethnicity'] = ubr.ubr_ethnicity(qnan.get('Race_WhatRaceEthnicity', None))
-        # ubr_education
-        data['ubr_education'] = ubr.ubr_education(qnan.get('EducationLevel_HighestGrade', None))
-        # ubr_income
-        data['ubr_income'] = ubr.ubr_income(qnan.get('Income_AnnualIncome', None))
-        # ubr_disability
-        data['ubr_disability'] = ubr.ubr_disability(qnan)
+        # Add the response to the list for the ubr_disability calculator if it has content.    TODO: Confirm if RDR has
+        # any pids with valid answers (not all None/PMI_Skip) to disability questions in TheBasics but also have an
+        # lfs survey response (not an expected use case).
+        for qnan in [basics_qnan, lfs_qnan]:
+            if qnan:
+                ubr_disability_responses.append(qnan)
+
+        # Except for ubr_disability, other UBR categories determined only from TheBasics data
+        if basics_qnan:
+            # ubr_sex
+            data['ubr_sex'] = ubr.ubr_sex(basics_qnan.get('BiologicalSexAtBirth_SexAtBirth', None))
+            # ubr_sexual_orientation
+            data['ubr_sexual_orientation'] = ubr.ubr_sexual_orientation(basics_qnan.get('TheBasics_SexualOrientation',
+                                                                                        None))
+            # ubr_gender_identity
+            data['ubr_gender_identity'] = ubr.ubr_gender_identity(
+                basics_qnan.get('BiologicalSexAtBirth_SexAtBirth', None),
+                basics_qnan.get('Gender_GenderIdentity', None),
+                basics_qnan.get('Gender_CloserGenderDescription', None)
+            )
+            # ubr_sexual_gender_minority
+            data['ubr_sexual_gender_minority'] = \
+                ubr.ubr_sexual_gender_minority(data['ubr_sexual_orientation'], data['ubr_gender_identity'])
+            # ubr_ethnicity
+            data['ubr_ethnicity'] = ubr.ubr_ethnicity(basics_qnan.get('Race_WhatRaceEthnicity', None))
+            # ubr_education
+            data['ubr_education'] = ubr.ubr_education(basics_qnan.get('EducationLevel_HighestGrade', None))
+            # ubr_income
+            data['ubr_income'] = ubr.ubr_income(basics_qnan.get('Income_AnnualIncome', None))
+
+        # ubr_disability() will handle cases where neither TheBasics nor lfs response exists (param is empty list)
+        data['ubr_disability'] = ubr.ubr_disability(ubr_disability_responses)
         # ubr_overall
         data['ubr_overall'] = ubr.ubr_overall(data)
 
@@ -1717,12 +1841,13 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
                     res = res_gen.make_resource(row.id, consent_validation_rec=row)
                     res.save()
 
-def rebuild_participant_summary_resource(p_id, res_gen=None, patch_data=None):
+def rebuild_participant_summary_resource(p_id, res_gen=None, patch_data=None, qc_mode=False):
     """
     Rebuild a resource record for a specific participant
     :param p_id: participant id
     :param res_gen: ParticipantSummaryGenerator object
     :param patch_data: dict of resource values to update/insert.
+    :param qc_mode: If True, the resource data will be generated and returned but not saved to the database
     :return:
     """
     # Allow for batch requests to rebuild participant summary data.
@@ -1737,8 +1862,9 @@ def rebuild_participant_summary_resource(p_id, res_gen=None, patch_data=None):
         else:
             logging.error('Participant Generator: Invalid patch data, nothing done.')
 
-    res = res_gen.make_resource(p_id)
-    res.save()
+    res = res_gen.make_resource(p_id, qc_mode=qc_mode)
+    if not qc_mode:
+        res.save()
 
     return res
 

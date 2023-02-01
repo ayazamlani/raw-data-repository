@@ -6,11 +6,12 @@ from datetime import date
 from enum import Enum
 from marshmallow import validate
 
-from rdr_service.participant_enums import QuestionnaireStatus, ParticipantCohort, Race, GenderIdentity, \
-    PhysicalMeasurementsStatus, OrderStatus, EnrollmentStatusV2, EhrStatus, WithdrawalStatus, WithdrawalReason, \
-    SuspensionStatus, QuestionnaireResponseStatus, QuestionnaireResponseClassificationType, \
-    DeceasedStatus, ParticipantCohortPilotFlag, WithdrawalAIANCeremonyStatus, BiobankOrderStatus, \
-    SampleCollectionMethod, PhysicalMeasurementsCollectType, OriginMeasurementUnit
+from rdr_service.participant_enums import (QuestionnaireStatus, ParticipantCohort, Race, GenderIdentity,
+    PhysicalMeasurementsStatus, OrderStatus, EnrollmentStatusV2, EhrStatus, WithdrawalStatus, WithdrawalReason,
+    SuspensionStatus, QuestionnaireResponseStatus, QuestionnaireResponseClassificationType,
+    DeceasedStatus, ParticipantCohortPilotFlag, WithdrawalAIANCeremonyStatus, BiobankOrderStatus,
+    SampleCollectionMethod, PhysicalMeasurementsCollectType, OriginMeasurementUnit,
+    EnrollmentStatusV30, EnrollmentStatusV31, DigitalHealthSharingStatusV31)
 from rdr_service.resource import Schema, fields
 from rdr_service.resource.constants import SchemaID
 
@@ -317,6 +318,7 @@ class PairingHistorySchema(Schema):
     organization_id = fields.Int32()
     site = fields.String(validate=validate.Length(max=255))
     site_id = fields.Int32()
+    version = fields.Int32()
 
     class Meta:
         schema_id = SchemaID.participant_pairing_history
@@ -353,7 +355,18 @@ class ParticipantSchema(Schema):
     enrl_core_participant_minus_pm_time = fields.DateTime()
     enrl_core_participant_time = fields.DateTime()
 
-    # TODO: Depreciate fields here that are duplicated by the new enrollment fields above.
+    # TODO: Future: Remove after RDR 3.0 calculations are finalized.
+    # PDR v3.0 Enrollment Status Calculations
+    enrl_v3_0_status = fields.EnumString(enum=EnrollmentStatusV30)
+    enrl_v3_0_status_id = fields.EnumInteger(enum=EnrollmentStatusV30)
+    enrl_v3_0_registered_time = fields.DateTime()
+    enrl_v3_0_participant_time = fields.DateTime()
+    enrl_v3_0_participant_plus_ehr_time = fields.DateTime()
+    enrl_v3_0_participant_pmb_eligible_time = fields.DateTime()
+    enrl_v3_0_core_participant_minus_pm_time = fields.DateTime()
+    enrl_v3_0_core_participant_time = fields.DateTime()
+
+    # Retaining during Goal 1 transition;  may be deprecated after V30/V31 acceptance
     enrollment_status = fields.EnumString(enum=EnrollmentStatusV2)
     enrollment_status_id = fields.EnumInteger(enum=EnrollmentStatusV2)
     enrollment_member = fields.DateTime()
@@ -361,6 +374,30 @@ class ParticipantSchema(Schema):
     enrollment_core_stored = fields.DateTime()
     enrollment_core_minus_pm = fields.DateTime()
 
+    # Goal 1 new additions
+    # TODO:  The v2 fields are temporary to do consistency checks for PEO report vs. RDR values
+    enrollment_status_legacy_v2 = fields.EnumString(enum=EnrollmentStatusV2)
+    enrollment_status_legacy_v2_id = fields.EnumInteger(enum=EnrollmentStatusV2)
+    # RDR v3.0 Enrollment Status Calculations
+    enrollment_status_v3_0 = fields.EnumString(enum=EnrollmentStatusV30)
+    enrollment_status_v3_0_id = fields.EnumInteger(enum=EnrollmentStatusV30)
+    enrollment_status_v3_0_participant_time = fields.DateTime()
+    enrollment_status_v3_0_participant_plus_ehr_time = fields.DateTime()
+    enrollment_status_v3_0_pmb_eligible_time = fields.DateTime()
+    enrollment_status_v3_0_core_minus_pm_time = fields.DateTime()
+    enrollment_status_v3_0_core_time = fields.DateTime()
+    # RDR v3.1 Enrollment Status Calculations
+    enrollment_status_v3_1 = fields.EnumString(enum=EnrollmentStatusV31)
+    enrollment_status_v3_1_id = fields.EnumInteger(enum=EnrollmentStatusV31)
+    enrollment_status_v3_1_participant_time = fields.DateTime()
+    enrollment_status_v3_1_participant_plus_ehr_time = fields.DateTime()
+    enrollment_status_v3_1_participant_plus_basics_time = fields.DateTime()
+    enrollment_status_v3_1_core_minus_pm_time = fields.DateTime()
+    enrollment_status_v3_1_core_time = fields.DateTime()
+    enrollment_status_v3_1_participant_plus_baseline_time = fields.DateTime()
+    health_datastream_sharing_status_v3_1 = fields.EnumString(enum=DigitalHealthSharingStatusV31)
+    health_datastream_sharing_status_v3_1_id = fields.EnumInteger(enum=DigitalHealthSharingStatusV31)
+    health_datastream_sharing_status_v3_1_time = fields.DateTime()
     # These EHR fields are populated from Curation data.
     ehr_status = fields.EnumString(enum=EhrStatus)
     ehr_status_id = fields.EnumInteger(enum=EhrStatus)

@@ -587,7 +587,15 @@ class GenomicAW2Raw(Base):
     chipwellbarcode = Column(String(255), nullable=True)
     call_rate = Column(String(255), nullable=True)
     genome_type = Column(String(80), nullable=True)
-    pipeline_id = Column(String(255), nullable=True)
+    pipeline_id = Column(String(255), nullable=True, index=True)
+    vcf_hf_path = Column(String(255), nullable=True)
+    vcf_hf_index_path = Column(String(255), nullable=True)
+    vcf_hf_md5_path = Column(String(255), nullable=True)
+    cram_path = Column(String(255), nullable=True)
+    cram_md5_path = Column(String(255), nullable=True)
+    crai_path = Column(String(255), nullable=True)
+    gvcf_path = Column(String(255), nullable=True)
+    gvcf_md5_path = Column(String(255), nullable=True)
 
 
 event.listen(GenomicAW2Raw, 'before_insert', model_insert_listener)
@@ -647,6 +655,7 @@ class GenomicAW3Raw(Base):
     crai_path = Column(String(255), nullable=True)
     gvcf_path = Column(String(255), nullable=True)
     gvcf_md5_path = Column(String(255), nullable=True)
+    processing_count = Column(String(255), nullable=True)
 
 
 event.listen(GenomicAW3Raw, 'before_insert', model_insert_listener)
@@ -701,6 +710,8 @@ class GenomicAW4Raw(Base):
     drc_mean_coverage = Column(String(255), nullable=True)
     drc_fp_concordance = Column(String(255), nullable=True)
     pass_to_research_pipeline = Column(String(255), nullable=True)
+    pipeline_id = Column(String(255), nullable=True, index=True)
+    processing_count = Column(String(255), nullable=True)
 
 
 event.listen(GenomicAW4Raw, 'before_insert', model_insert_listener)
@@ -740,6 +751,7 @@ class GenomicW1ILRaw(Base):
     informing_loop_hdr = Column(String(255), nullable=True)
     aou_hdr_coverage = Column(String(255), nullable=True)
     contamination = Column(String(255), nullable=True)
+    sex_ploidy = Column(String(255), nullable=True)
 
 
 event.listen(GenomicW1ILRaw, 'before_insert', model_insert_listener)
@@ -1021,79 +1033,61 @@ class GenomicGCValidationMetrics(Base):
     drcFpConcordance = Column('drc_fp_concordance', String(255), nullable=True)
 
     # Genotyping Data (Array) reconciliation
-    idatRedReceived = Column('idat_red_received', SmallInteger, nullable=False, default=0)
     idatRedDeleted = Column('idat_red_deleted', SmallInteger, nullable=False, default=0)
     idatRedPath = Column('idat_red_path', String(255), nullable=True)
 
-    idatGreenReceived = Column('idat_green_received', SmallInteger, nullable=False, default=0)
     idatGreenDeleted = Column('idat_green_deleted', SmallInteger, nullable=False, default=0)
     idatGreenPath = Column('idat_green_path', String(255), nullable=True)
 
-    idatRedMd5Received = Column('idat_red_md5_received', SmallInteger, nullable=False, default=0)
     idatRedMd5Deleted = Column('idat_red_md5_deleted', SmallInteger, nullable=False, default=0)
     idatRedMd5Path = Column('idat_red_md5_path', String(255), nullable=True)
 
-    idatGreenMd5Received = Column('idat_green_md5_received', SmallInteger, nullable=False, default=0)
     idatGreenMd5Deleted = Column('idat_green_md5_deleted', SmallInteger, nullable=False, default=0)
     idatGreenMd5Path = Column('idat_green_md5_path', String(255), nullable=True)
 
-    vcfReceived = Column('vcf_received', SmallInteger, nullable=False, default=0)
     vcfDeleted = Column('vcf_deleted', SmallInteger, nullable=False, default=0)
     vcfPath = Column('vcf_path', String(255), nullable=True)
 
-    vcfMd5Received = Column('vcf_md5_received', SmallInteger, nullable=False, default=0)
     vcfMd5Deleted = Column('vcf_md5_deleted', SmallInteger, nullable=False, default=0)
     vcfMd5Path = Column('vcf_md5_path', String(255), nullable=True)
 
-    vcfTbiReceived = Column('vcf_tbi_received', SmallInteger, nullable=False, default=0)
     vcfTbiDeleted = Column('vcf_tbi_deleted', SmallInteger, nullable=False, default=0)
     vcfTbiPath = Column('vcf_tbi_path', String(255), nullable=True)
 
     # Sequencing Data (WGS) reconciliation
     # Single sample VCF: Hard - filtered for clinical purpose
-    hfVcfReceived = Column('hf_vcf_received', SmallInteger, nullable=False, default=0)
     hfVcfDeleted = Column('hf_vcf_deleted', SmallInteger, nullable=False, default=0)
     hfVcfPath = Column('hf_vcf_path', String(255), nullable=True)
 
-    hfVcfTbiReceived = Column('hf_vcf_tbi_received', SmallInteger, nullable=False, default=0)
     hfVcfTbiDeleted = Column('hf_vcf_tbi_deleted', SmallInteger, nullable=False, default=0)
     hfVcfTbiPath = Column('hf_vcf_tbi_path', String(255), nullable=True)
 
-    hfVcfMd5Received = Column('hf_vcf_md5_received', SmallInteger, nullable=False, default=0)
     hfVcfMd5Deleted = Column('hf_vcf_md5_deleted', SmallInteger, nullable=False, default=0)
     hfVcfMd5Path = Column('hf_vcf_md5_path', String(255), nullable=True)
 
     # Single sample VCF: Raw for research purpose
-    rawVcfReceived = Column('raw_vcf_received', SmallInteger, nullable=False, default=0)
     rawVcfDeleted = Column('raw_vcf_deleted', SmallInteger, nullable=False, default=0)
     rawVcfPath = Column('raw_vcf_path', String(255), nullable=True)
 
-    rawVcfTbiReceived = Column('raw_vcf_tbi_received', SmallInteger, nullable=False, default=0)
     rawVcfTbiDeleted = Column('raw_vcf_tbi_deleted', SmallInteger, nullable=False, default=0)
     rawVcfTbiPath = Column('raw_vcf_tbi_path', String(255), nullable=True)
 
-    rawVcfMd5Received = Column('raw_vcf_md5_received', SmallInteger, nullable=False, default=0)
     rawVcfMd5Deleted = Column('raw_vcf_md5_deleted', SmallInteger, nullable=False, default=0)
     rawVcfMd5Path = Column('raw_vcf_md5_path', String(255), nullable=True)
 
     # CRAMs and CRAIs
-    cramReceived = Column('cram_received', SmallInteger, nullable=False, default=0)
     cramDeleted = Column('cram_deleted', SmallInteger, nullable=False, default=0)
     cramPath = Column('cram_path', String(255), nullable=True)
 
-    cramMd5Received = Column('cram_md5_received', SmallInteger, nullable=False, default=0)
     cramMd5Deleted = Column('cram_md5_deleted', SmallInteger, nullable=False, default=0)
     cramMd5Path = Column('cram_md5_path', String(255), nullable=True)
 
-    craiReceived = Column('crai_received', SmallInteger, nullable=False, default=0)
     craiDeleted = Column('crai_deleted', SmallInteger, nullable=False, default=0)
     craiPath = Column('crai_path', String(255), nullable=True)
 
-    gvcfReceived = Column('gvcf_received', SmallInteger, nullable=False, default=0)
     gvcfDeleted = Column('gvcf_deleted', SmallInteger, nullable=False, default=0)
     gvcfPath = Column('gvcf_path', String(512), nullable=True)
 
-    gvcfMd5Received = Column('gvcf_md5_received', SmallInteger, nullable=False, default=0)
     gvcfMd5Deleted = Column('gvcf_md5_deleted', SmallInteger, nullable=False, default=0)
     gvcfMd5Path = Column('gvcf_md5_path', String(255), nullable=True)
 
@@ -1107,7 +1101,13 @@ class GenomicGCValidationMetrics(Base):
                                    default=GenomicSubProcessResult.UNSET)
     contaminationCategoryStr = Column('contamination_category_str', String(64), default="UNSET")
 
-    pipelineId = Column('pipeline_id', String(255), nullable=True)
+    pipelineId = Column('pipeline_id', String(255), nullable=True, index=True)
+
+    processingCount = Column('processing_count', SmallInteger, nullable=False, default=0)
+    aw3ReadyFlag = Column('aw3_ready_flag', SmallInteger, nullable=False, default=0)
+    aw3ManifestJobRunID = Column('aw3_manifest_job_run_id', Integer, ForeignKey('genomic_job_run.id'))
+    aw3ManifestFileId = Column('aw3_manifest_file_id', Integer, ForeignKey("genomic_manifest_file.id"))
+    aw4ManifestJobRunID = Column('aw4_manifest_job_run_id', Integer, ForeignKey('genomic_job_run.id'))
 
 
 event.listen(GenomicGCValidationMetrics, 'before_insert', model_insert_listener)
@@ -1279,11 +1279,17 @@ class GenomicMemberReportState(Base):
                 primary_key=True, autoincrement=True, nullable=False)
     created = Column(DateTime)
     modified = Column(DateTime)
+    message_record_id = Column(Integer, nullable=True)
     genomic_set_member_id = Column(ForeignKey('genomic_set_member.id'), nullable=False)
     genomic_report_state = Column(Enum(GenomicReportState), default=GenomicReportState.UNSET)
     genomic_report_state_str = Column(String(64), default="UNSET")
     participant_id = Column(Integer, ForeignKey("participant.participant_id"), nullable=True)
+    event_type = Column(String(256), nullable=True)
+    event_authored_time = Column(UTCDateTime6, nullable=True)
     module = Column(String(80), nullable=False)
+    sample_id = Column(String(80), nullable=True, index=True)
+    report_revision_number = Column(SmallInteger, nullable=True)
+    created_from_metric_id = Column(Integer, ForeignKey("user_event_metrics.id"), nullable=True)
 
 
 event.listen(GenomicMemberReportState, 'before_insert', model_insert_listener)
@@ -1304,11 +1310,12 @@ class GenomicInformingLoop(Base):
     modified = Column(DateTime, nullable=True)
     message_record_id = Column(Integer, nullable=True)
     participant_id = Column(Integer, ForeignKey("participant.participant_id"), nullable=False)
-    event_type = Column(String(256), nullable=False)
-    event_authored_time = Column(UTCDateTime6)
-    module_type = Column(String(128))
-    decision_value = Column(String(128))
+    event_type = Column(String(256), nullable=False, index=True)
+    event_authored_time = Column(UTCDateTime6, index=True)
+    module_type = Column(String(128), index=True)
+    decision_value = Column(String(128), index=True)
     sample_id = Column(String(80), nullable=True, index=True)
+    created_from_metric_id = Column(Integer, ForeignKey("user_event_metrics.id"), nullable=True)
 
 
 event.listen(GenomicInformingLoop, 'before_insert', model_insert_listener)
@@ -1329,16 +1336,107 @@ class GenomicResultViewed(Base):
     modified = Column(DateTime)
     message_record_id = Column(Integer, nullable=True)
     participant_id = Column(Integer, ForeignKey("participant.participant_id"), nullable=False)
-    event_type = Column(String(256), nullable=False)
-    event_authored_time = Column(UTCDateTime6)
-    module_type = Column(String(128))
+    event_type = Column(String(256), nullable=False, index=True)
+    event_authored_time = Column(UTCDateTime6, index=True)
+    module_type = Column(String(128), index=True)
     first_viewed = Column(UTCDateTime6)
     last_viewed = Column(UTCDateTime6)
     sample_id = Column(String(80), nullable=True, index=True)
+    created_from_metric_id = Column(Integer, ForeignKey("user_event_metrics.id"), nullable=True)
 
 
 event.listen(GenomicResultViewed, 'before_insert', model_insert_listener)
 event.listen(GenomicResultViewed, 'before_update', model_update_listener)
+
+
+class GenomicAppointmentEvent(Base):
+    """
+    Used for maintaining normalized value set of
+    appointment events ingested from MessageBrokerEventData
+    """
+
+    __tablename__ = 'genomic_appointment_event'
+
+    id = Column(Integer, primary_key=True, autoincrement=True, nullable=False)
+    created = Column(DateTime)
+    modified = Column(DateTime)
+    message_record_id = Column(Integer)
+    participant_id = Column(Integer, ForeignKey("participant.participant_id"), nullable=False)
+    event_type = Column(String(256), nullable=False)
+    event_authored_time = Column(UTCDateTime6)
+    module_type = Column(String(255))
+    appointment_id = Column(Integer, nullable=False)
+    appointment_timestamp = Column(UTCDateTime6)
+    appointment_timezone = Column(String(255))
+    source = Column(String(255))
+    location = Column(String(255))
+    contact_number = Column(String(255))
+    language = Column(String(255))
+    cancellation_reason = Column(String(255))
+    created_from_metric_id = Column(Integer, ForeignKey("genomic_appointment_event_metrics.id"))
+
+
+event.listen(GenomicAppointmentEvent, 'before_insert', model_insert_listener)
+event.listen(GenomicAppointmentEvent, 'before_update', model_update_listener)
+
+
+class GenomicAppointmentEventMetrics(Base):
+    """
+    Used for storage GHR3 appointment metrics
+    """
+
+    __tablename__ = 'genomic_appointment_event_metrics'
+
+    id = Column(Integer,
+                primary_key=True, autoincrement=True, nullable=False)
+    created = Column(DateTime)
+    modified = Column(DateTime)
+    participant_id = Column(Integer, ForeignKey("participant.participant_id"), nullable=False, index=True)
+    appointment_event = Column(JSON, nullable=False)
+    module_type = Column(String(255), nullable=False)
+    event_authored_time = Column(UTCDateTime6, nullable=False)
+    event_type = Column(String(256), nullable=False)
+    file_path = Column(String(512), index=True, nullable=False)
+    reconcile_job_run_id = Column(Integer, ForeignKey("genomic_job_run.id"), nullable=True)
+
+
+event.listen(GenomicAppointmentEventMetrics, 'before_insert', model_insert_listener)
+event.listen(GenomicAppointmentEventMetrics, 'before_update', model_update_listener)
+
+
+class GenomicAppointmentEventNotified(Base):
+    """
+    Used to record notifications sent for participants whose GRoR consent has changed
+    """
+
+    __tablename__ = 'genomic_appointment_event_notified'
+
+    id = Column(Integer, primary_key=True, autoincrement=True, nullable=False)
+    created = Column(DateTime)
+    modified = Column(DateTime)
+    participant_id = Column(Integer, ForeignKey("participant.participant_id"), nullable=False, index=True)
+    appointment_event_id = Column(Integer, ForeignKey("genomic_appointment_event.id"), nullable=False, index=True)
+
+
+event.listen(GenomicAppointmentEventNotified, 'before_insert', model_insert_listener)
+event.listen(GenomicAppointmentEventNotified, 'before_update', model_update_listener)
+
+
+class GenomicGCROutreachEscalationNotified(Base):
+    """
+    Used to record notifications sent for participants when GCR outreach 14 day escalation email sent
+    """
+
+    __tablename__ = 'genomic_gcr_outreach_escalation_notified'
+
+    id = Column(Integer, primary_key=True, autoincrement=True, nullable=False)
+    created = Column(DateTime)
+    modified = Column(DateTime)
+    participant_id = Column(Integer, ForeignKey("participant.participant_id"), nullable=False, index=True)
+
+
+event.listen(GenomicGCROutreachEscalationNotified, 'before_insert', model_insert_listener)
+event.listen(GenomicGCROutreachEscalationNotified, 'before_update', model_update_listener)
 
 
 class GenomicGcDataFile(Base):
@@ -1445,8 +1543,8 @@ class UserEventMetrics(Base):
     created = Column(DateTime)
     modified = Column(DateTime)
     participant_id = Column(Integer, ForeignKey("participant.participant_id"), nullable=False, index=True)
-    created_at = Column(String(255))
-    event_name = Column(String(512))
+    created_at = Column(String(255), index=True)
+    event_name = Column(String(512), index=True)
     device = Column(String(255))
     operating_system = Column(String(255))
     browser = Column(String(255))
@@ -1472,11 +1570,13 @@ class GenomicSampleSwap(Base):
     created = Column(DateTime)
     modified = Column(DateTime)
     name = Column(String(255), nullable=False)
-    explanation = Column(String(512))
+    description = Column(String(512))
     open_investigation = Column(SmallInteger, nullable=False, default=0)
-    open_investigation_date = Column(DateTime)
-    closed_investigation = Column(DateTime)
+    open_investigation_date = Column(DateTime, nullable=True)
+    closed_investigation = Column(SmallInteger, nullable=False, default=0)
     closed_investigation_date = Column(DateTime, nullable=True)
+    number = Column(SmallInteger)
+    location = Column(String(512))
     ignore_flag = Column(SmallInteger, nullable=False, default=0)
 
 
@@ -1528,3 +1628,47 @@ class GenomicCVLResultPastDue(Base):
 
 event.listen(GenomicCVLResultPastDue, 'before_insert', model_insert_listener)
 event.listen(GenomicCVLResultPastDue, 'before_update', model_update_listener)
+
+
+class GenomicResultWithdrawals(Base):
+    """
+    Used for storing the samples in results pipeline
+    that have been withdrawn
+    """
+
+    __tablename__ = "genomic_result_withdrawals"
+
+    id = Column(Integer,
+                primary_key=True, autoincrement=True, nullable=False)
+    created = Column(DateTime)
+    modified = Column(DateTime)
+    participant_id = Column(Integer, ForeignKey("participant.participant_id"), nullable=False, index=True)
+    array_results = Column(SmallInteger, nullable=False, default=0)
+    cvl_results = Column(SmallInteger, nullable=False, default=0)
+
+
+event.listen(GenomicResultWithdrawals, 'before_insert', model_insert_listener)
+event.listen(GenomicResultWithdrawals, 'before_update', model_update_listener)
+
+
+class GenomicStorageUpdate(Base):
+    """
+    Used for storing which genomic data files, in relation to metrics records,
+    have had the storage class updated
+    """
+
+    __tablename__ = "genomic_storage_update"
+
+    id = Column(Integer,
+                primary_key=True, autoincrement=True, nullable=False)
+    created = Column(DateTime)
+    modified = Column(DateTime)
+    metrics_id = Column(Integer, ForeignKey("genomic_gc_validation_metrics.id"), nullable=False, index=True)
+    genome_type = Column(String(80), nullable=True)
+    storage_class = Column(String(250), nullable=False)
+    has_error = Column(SmallInteger, nullable=False, default=0)
+    ignore_flag = Column(SmallInteger, nullable=False, default=0)
+
+
+event.listen(GenomicStorageUpdate, 'before_insert', model_insert_listener)
+event.listen(GenomicStorageUpdate, 'before_update', model_update_listener)

@@ -2,17 +2,15 @@
 
 This defines the APIs and the handlers for the APIs. All responses are JSON.
 """
-# pylint: disable=unused-import
-import rdr_service.activate_debugger
 
 import logging
 
-from flask import got_request_exception, Response
+from flask import got_request_exception
 from flask_restful import Api
 from sqlalchemy.exc import DBAPIError
-from werkzeug.exceptions import HTTPException, InternalServerError
+from werkzeug.exceptions import HTTPException
 
-from rdr_service import app_util, config_api, version_api
+from rdr_service import api_util, app_util, config_api, version_api
 from rdr_service.api import metrics_ehr_api
 from rdr_service.api.awardee_api import AwardeeApi
 from rdr_service.api.bigquery_participant_summary_api import BQParticipantSummaryApi
@@ -25,7 +23,7 @@ from rdr_service.api.check_ppi_data_api import check_ppi_data
 from rdr_service.api.data_gen_api import DataGenApi, SpecDataGenApi
 from rdr_service.api.deceased_report_api import DeceasedReportApi, DeceasedReportReviewApi
 from rdr_service.api.mail_kit_order_api import MailKitOrderApi
-from rdr_service.api.genomic_api import GenomicPiiApi, GenomicOutreachApi, GenomicOutreachApiV2
+from rdr_service.api.genomic_api import GenomicPiiApi, GenomicOutreachApi, GenomicOutreachApiV2, GenomicSchedulingApi
 from rdr_service.api.import_codebook_api import import_codebook
 from rdr_service.api.metrics_fields_api import MetricsFieldsApi
 from rdr_service.api.participant_api import ParticipantApi, ParticipantResearchIdApi
@@ -34,6 +32,7 @@ from rdr_service.api.participant_summary_api import ParticipantSummaryApi, \
     ParticipantSummaryModifiedApi, ParticipantSummaryCheckLoginApi
 from rdr_service.api.patient_status import PatientStatusApi, PatientStatusHistoryApi
 from rdr_service.api.physical_measurements_api import PhysicalMeasurementsApi, sync_physical_measurements
+from rdr_service.api.profile_update_api import ProfileUpdateApi
 from rdr_service.api.public_metrics_api import PublicMetricsApi
 from rdr_service.api.questionnaire_api import QuestionnaireApi
 from rdr_service.api.questionnaire_response_api import ParticipantQuestionnaireAnswers, QuestionnaireResponseApi
@@ -43,6 +42,8 @@ from rdr_service.api.research_projects_directory_api import ResearchProjectsDire
 from rdr_service.api.redcap_workbench_audit_api import RedcapResearcherAuditApi, RedcapWorkbenchAuditApi
 from rdr_service.api.message_broker_api import MessageBrokerApi
 from rdr_service.api.onsite_verification_api import OnsiteVerificationApi
+from rdr_service.api.nph_participant_biobank_order_api import NphOrderApi
+from rdr_service.api.nph_participant_api import nph_participant
 
 from rdr_service.services.flask import app, API_PREFIX, flask_warmup, flask_start, flask_stop
 from rdr_service.services.gcp_logging import begin_request_logging, end_request_logging, \
@@ -319,10 +320,23 @@ api.add_resource(GenomicOutreachApiV2,
                  endpoint='genomic.outreachv2',
                  methods=['GET', 'POST', 'PUT'])
 
+api.add_resource(GenomicSchedulingApi,
+                 API_PREFIX + "GenomicScheduling",
+                 endpoint='genomic.scheduling',
+                 methods=['GET'])
+
 api.add_resource(
     DeceasedReportApi,
     API_PREFIX + 'Participant/<string:participant_id>/Observation',
     endpoint='observation',
+    methods=['POST']
+)
+
+api.add_resource(
+    ProfileUpdateApi,
+    api_util.get_versioned_url_prefix(version=1) + 'Participant/ProfileUpdate',
+    api_util.get_versioned_url_prefix(version=1) + 'Patient',
+    endpoint='profile_update',
     methods=['POST']
 )
 
@@ -364,6 +378,17 @@ api.add_resource(MessageBrokerApi, API_PREFIX + "MessageBroker", endpoint="messa
 #
 api.add_resource(SpecDataGenApi, API_PREFIX + "SpecDataGen", endpoint="specdatagen", methods=["POST"])
 
+#
+# NPH Order API DA-3026 dchan
+#
+api.add_resource(
+    NphOrderApi,
+    API_PREFIX + '/api/v1/nph/Participant/<string:nph_participant_id>/BiobankOrder',
+    API_PREFIX + '/api/v1/nph/Participant/<string:nph_participant_id>/BiobankOrder/<int:rdr_order_id>',
+    endpoint='nph.participant.biobank_order',
+    methods=['POST','PUT', 'PATCH']
+)
+
 app.add_url_rule(
     API_PREFIX + "PhysicalMeasurements/_history",
     endpoint="physicalMeasurementsSync",
@@ -387,6 +412,9 @@ api.add_resource(
 app.add_url_rule("/_ah/warmup", endpoint="warmup", view_func=flask_warmup, methods=["GET"])
 app.add_url_rule("/_ah/start", endpoint="start", view_func=flask_start, methods=["GET"])
 app.add_url_rule("/_ah/stop", endpoint="stop", view_func=flask_stop, methods=["GET"])
+
+
+app.add_url_rule(API_PREFIX + '/nph_participant', view_func=nph_participant, methods=["POST"])
 
 app.before_request(begin_request_logging)  # Must be first before_request() call.
 app.before_request(app_util.request_logging)

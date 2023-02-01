@@ -97,7 +97,21 @@ def log_api_request(log: RequestsLog = None, model_obj=None):
     return save_raw_request_record(log)
 
 
-class BaseApi(Resource):
+class ApiUtilMixin:
+    """
+    Class for encapsulating utility functions useful for any API functionality, making them available to subclasses
+    without defining how endpoints should behave.
+    """
+
+    @classmethod
+    def get_request_json(cls):
+        """
+        Get the JSON formatted data for the request. Use when only expecting JSON and when ignoring mimetype.
+        """
+        return request.get_json(force=True)
+
+
+class BaseApi(Resource, ApiUtilMixin):
     """Base class for API handlers.
 
   Provides a generic implementation for an API handler which is backed by a
@@ -131,12 +145,12 @@ class BaseApi(Resource):
 
     def get(self, id_=None, participant_id=None):
         """Handle a GET request.
-
-    Args:
-      id: If provided this is the id of the object to fetch.  If this is not
-        present, this is assumed to be a "list" request, and the list() function
-        will be called.
-    """
+        Args:
+          id_: If provided this is the id of the object to fetch.  If this is not
+            present, this is assumed to be a "list" request, and the list() function
+            will be called.
+          participant_id:
+        """
         if id_ is None:
             return self.list(participant_id)
         obj = self.dao.get_with_children(id_) if self._get_returns_children else self.dao.get(id_)
@@ -171,7 +185,7 @@ class BaseApi(Resource):
         Handles a POST (insert) request.
         participant_id: The ancestor id.
         """
-        resource = request.get_json(force=True)
+        resource = self.get_request_json()
         m = self._get_model_to_insert(resource, participant_id)
         result = self._do_insert(m)
 
@@ -179,6 +193,9 @@ class BaseApi(Resource):
         # in test env to ParticipantSummary
         if result.__class__.__name__.lower() == 'participantsummary':
             result.wasEhrDataAvailable = None
+            result.wasParticipantMediatedEhrAvailable = None
+            result.healthDataStreamSharingStatusV3_1 = None
+            result.healthDataStreamSharingStatusV3_1Time = None
 
         if participant_id or (result and hasattr(result, 'participantId')):
             if not participant_id:
@@ -190,7 +207,7 @@ class BaseApi(Resource):
             else:
                 params = {'p_id': participant_id}
                 self._task.execute('rebuild_one_participant_task',
-                                    queue='resource-tasks', payload=params, in_seconds=5)
+                                    queue='resource-tasks', payload=params, in_seconds=30)
 
         log_api_request(log=request.log_record, model_obj=result)
         self._archive_request_log()
@@ -277,9 +294,9 @@ class BaseApi(Resource):
         if results.pagination_token:
             query_params = request.args.copy()
             query_params["_token"] = results.pagination_token
-
             next_url = main.api.url_for(self.__class__, _external=True, **query_params.to_dict(flat=False))
             bundle_dict["link"] = [{"relation": "next", "url": next_url}]
+
         entries = []
         for item in results.items:
             response_json = self._make_response(item)
@@ -357,7 +374,7 @@ class UpdatableApi(BaseApi):
     :return: make_response
     """
         if not resource:
-            resource = request.get_json(force=True)
+            resource = self.get_request_json()
         if skip_etag:
             expected_version = self.dao.get_etag(id_, participant_id)
         else:
@@ -377,7 +394,7 @@ class UpdatableApi(BaseApi):
             else:
                 params = {'p_id': participant_id}
                 self._task.execute('rebuild_one_participant_task',
-                                    queue='resource-tasks', payload=params, in_seconds=5)
+                                    queue='resource-tasks', payload=params, in_seconds=30)
 
         log_api_request(log=request.log_record, model_obj=m)
         self._archive_request_log()
@@ -395,7 +412,7 @@ class UpdatableApi(BaseApi):
     Args:
       :param id_: The id of the object to update.
     """
-        resource = request.get_json(force=True)
+        resource = self.get_request_json()
         etag = request.headers.get("If-Match")
         if not etag:
             raise BadRequest("If-Match is missing for PATCH request")
@@ -412,7 +429,7 @@ class UpdatableApi(BaseApi):
             else:
                 params = {'p_id': participant_id}
                 self._task.execute('rebuild_one_participant_task',
-                                   queue='resource-tasks', payload=params, in_seconds=5)
+                                   queue='resource-tasks', payload=params, in_seconds=30)
 
         log_api_request(log=request.log_record, model_obj=obj)
         self._archive_request_log()

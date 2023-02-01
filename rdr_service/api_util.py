@@ -13,6 +13,7 @@ from rdr_service.code_constants import UNMAPPED, UNSET
 # Role constants
 PTC = "ptc"
 HEALTHPRO = "healthpro"
+RTI = "rti"
 RDR = "rdr"
 CURATION = "curation"
 AWARDEE = "awardee_sa"
@@ -24,11 +25,15 @@ RESOURCE = 'resource'
 DEV_MAIL = "example@example.com"
 GEM = "gem"
 BIOBANK = 'biobank'
+RTI_AND_HEALTHPRO = [RTI, HEALTHPRO]
+SUPPORT = 'support'
 RDR_AND_PTC = [RDR, PTC]
 RDR_AND_HEALTHPRO = [RDR, HEALTHPRO]
 PTC_AND_GEM = [PTC, GEM]
-WORKBENCH_AND_REDCAP = [WORKBENCH, REDCAP]
-STOREFRONT_AND_REDCAP = [STOREFRONT, REDCAP]
+WORKBENCH_AND_REDCAP_AND_RDR = [WORKBENCH, REDCAP, RDR]
+STOREFRONT_AND_REDCAP_RDR = [STOREFRONT, REDCAP, RDR]
+STOREFRONT_AND_RDR = [STOREFRONT, RDR]
+REDCAP_AND_RDR = [REDCAP, RDR]
 PTC_AND_HEALTHPRO = [PTC, HEALTHPRO]
 PTC_HEALTHPRO_AWARDEE = [PTC, HEALTHPRO, AWARDEE]
 PTC_HEALTHPRO_AWARDEE_CURATION = [PTC, HEALTHPRO, AWARDEE, CURATION]
@@ -67,7 +72,7 @@ def convert_to_datetime(date):
     return datetime.datetime.combine(date, datetime.datetime.min.time())
 
 
-def format_json_bool(obj, field_name):
+def format_json_bool(obj, field_name: str):
     if field_name not in obj:
         return
     bool_map = {
@@ -265,3 +270,7 @@ def dispatch_task(endpoint: str, payload: dict, in_seconds=30, quiet=True, proje
             quiet=quiet,
             project_id=project_id
         )
+
+
+def get_versioned_url_prefix(version):
+    return f'/rdr/v{version}/'

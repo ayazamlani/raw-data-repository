@@ -588,3 +588,109 @@ class CurationEtlTest(ToolTestMixin, BaseTestCase):
                     ]
                 ]))
                 self.assertEqual(PMI_SKIP_CODE, answer.value_ppi_code)
+
+    def test_cutoff_date_questionnaire_response_used(self):
+        """The latest questionnaire response received before the cutoff date for a module should be used"""
+        # Note: this only applies to modules that shouldn't roll up answers (ConsentPII should be rolled up)
+
+        # Create a questionnaire response that would be used instead of the default for the test suite
+        self._setup_questionnaire_response(
+            self.participant,
+            self.questionnaire,
+            indexed_answers=[
+                (1, 'valueString', 'update'),
+                (3, 'valueString', 'intermediate answer')
+            ],
+            authored=datetime(2020, 5, 10),
+            created=datetime(2020, 5, 10)
+        )
+
+        self._setup_questionnaire_response(
+            self.participant,
+            self.questionnaire,
+            indexed_answers=[
+                (1, 'valueString', 'update2'),
+                (3, 'valueString', 'final answer')
+            ],
+            authored=datetime(2022, 5, 10),
+            created=datetime(2022, 5, 10)
+        )
+
+        # Check that we are only seeing the answers from the questionnaire response before cutoff date
+        self.run_cdm_data_generation(cutoff='2022-04-01')
+        for question_index, question in enumerate(self.questionnaire.questions):
+            expected_answer = None
+            if question_index == 1:
+                expected_answer = 'update'
+            elif question_index == 3:
+                expected_answer = 'intermediate answer'
+
+            src_clean_answer = self.session.query(SrcClean).filter(
+                SrcClean.question_code_id == question.codeId
+            ).one_or_none()
+            if expected_answer is None:
+                self.assertIsNone(src_clean_answer)
+            else:
+                self.assertEqual(expected_answer, src_clean_answer.value_string)
+        self.session.commit()
+
+        # Returns the newest answers without cutoff
+        self.run_cdm_data_generation()
+        for question_index, question in enumerate(self.questionnaire.questions):
+            expected_answer = None
+            if question_index == 1:
+                expected_answer = 'update2'
+            elif question_index == 3:
+                expected_answer = 'final answer'
+
+            src_clean_answer = self.session.query(SrcClean).filter(
+                SrcClean.question_code_id == question.codeId
+            ).one_or_none()
+            if expected_answer is None:
+                self.assertIsNone(src_clean_answer)
+            else:
+                self.assertEqual(expected_answer, src_clean_answer.value_string)
+
+    def test_exclude_profile_update_questionnaire_response(self):
+        """Questionnaire Responses with PROFILE_UPDATE classification should be excluded"""
+
+
+        # Create a questionnaire response that would be used instead of the default for the test suite
+        self._setup_questionnaire_response(
+            self.participant,
+            self.questionnaire,
+            indexed_answers=[
+                (1, 'valueString', 'update'),
+                (3, 'valueString', 'final answer')
+            ],
+            authored=datetime(2020, 6, 10),
+            created=datetime(2020, 6, 10)
+        )
+
+        self._setup_questionnaire_response(
+            self.participant,
+            self.questionnaire,
+            indexed_answers=[
+                (1, 'valueString', 'profile update'),
+            ],
+            authored=datetime(2021, 6, 10),
+            created=datetime(2021, 6, 10),
+            classification_type=QuestionnaireResponseClassificationType.PROFILE_UPDATE
+        )
+
+        # Check that we are only seeing the answers from the latest questionnaire response
+        self.run_cdm_data_generation()
+        for question_index, question in enumerate(self.questionnaire.questions):
+            expected_answer = None
+            if question_index == 1:
+                expected_answer = 'update'
+            elif question_index == 3:
+                expected_answer = 'final answer'
+
+            src_clean_answer = self.session.query(SrcClean).filter(
+                SrcClean.question_code_id == question.codeId
+            ).one_or_none()
+            if expected_answer is None:
+                self.assertIsNone(src_clean_answer)
+            else:
+                self.assertEqual(expected_answer, src_clean_answer.value_string)

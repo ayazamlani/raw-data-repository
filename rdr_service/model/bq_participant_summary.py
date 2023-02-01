@@ -241,13 +241,14 @@ class BQPairingHistorySchema(BQSchema):
     """
     Participant pairing history
     """
-    last_modified = BQField('last_modified', BQFieldTypeEnum.DATETIME, BQFieldModeEnum.REQUIRED)
-    hpo = BQField('hpo', BQFieldTypeEnum.STRING, BQFieldModeEnum.REQUIRED)
-    hpo_id = BQField('hpo_id', BQFieldTypeEnum.INTEGER, BQFieldModeEnum.REQUIRED)
+    last_modified = BQField('last_modified', BQFieldTypeEnum.DATETIME, BQFieldModeEnum.NULLABLE)
+    hpo = BQField('hpo', BQFieldTypeEnum.STRING, BQFieldModeEnum.NULLABLE)
+    hpo_id = BQField('hpo_id', BQFieldTypeEnum.INTEGER, BQFieldModeEnum.NULLABLE)
     organization = BQField('organization', BQFieldTypeEnum.STRING, BQFieldModeEnum.NULLABLE)
     organization_id = BQField('organization_id', BQFieldTypeEnum.INTEGER, BQFieldModeEnum.NULLABLE)
     site = BQField('site', BQFieldTypeEnum.STRING, BQFieldModeEnum.NULLABLE)
     site_id = BQField('site_id', BQFieldTypeEnum.INTEGER, BQFieldModeEnum.NULLABLE)
+    version = BQField('version', BQFieldTypeEnum.INTEGER, BQFieldModeEnum.NULLABLE)
 
 
 class BQParticipantSummarySchema(BQSchema):
@@ -400,7 +401,47 @@ class BQParticipantSummarySchema(BQSchema):
 
     sexual_orientations = BQRecordField('sexual_orientations', schema=BQSexualOrientationSchema)
     age_at_consent = BQField('age_at_consent', BQFieldTypeEnum.INTEGER, BQFieldModeEnum.NULLABLE)
+    research_id = BQField('research_id', BQFieldTypeEnum.INTEGER, BQFieldModeEnum.NULLABLE)
 
+    # New Goal 1 additions, ingested from RDR
+    # enrollment_core_minus_pm is the legacy (pre V3.0) timestamp from RDR participant_summary
+    enrollment_status_legacy_v2 = BQField('enrollment_status_legacy_v2', BQFieldTypeEnum.STRING,
+                                          BQFieldModeEnum.NULLABLE)
+    enrollment_status_legacy_v2_id = BQField('enrollment_status_legacy_v2_id', BQFieldTypeEnum.INTEGER,
+                                             BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_0 = BQField('enrollment_status_v3_0', BQFieldTypeEnum.STRING, BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_0_id = BQField('enrollment_status_v3_0_id', BQFieldTypeEnum.INTEGER, BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_0_participant_time = BQField('enrollment_status_v3_0_participant_time',
+                                                      BQFieldTypeEnum.DATETIME, BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_0_participant_plus_ehr_time = BQField('enrollment_status_v3_0_participant_plus_ehr_time',
+                                                               BQFieldTypeEnum.DATETIME, BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_0_pmb_eligible_time = BQField('enrollment_status_v3_0_pmb_eligible_time',
+                                                       BQFieldTypeEnum.DATETIME, BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_0_core_minus_pm_time = BQField('enrollment_status_v3_0_core_minus_pm_time',
+                                                        BQFieldTypeEnum.DATETIME, BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_0_core_time = BQField('enrollment_status_v3_0_core_time', BQFieldTypeEnum.DATETIME,
+                                               BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_1 = BQField('enrollment_status_v3_1', BQFieldTypeEnum.STRING, BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_1_id = BQField('enrollment_status_v3_1_id', BQFieldTypeEnum.INTEGER, BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_1_participant_time = BQField('enrollment_status_v3_1_participant_time',
+                                                      BQFieldTypeEnum.DATETIME, BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_1_participant_plus_ehr_time = BQField('enrollment_status_v3_1_participant_plus_ehr_time',
+                                                               BQFieldTypeEnum.DATETIME, BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_1_participant_plus_basics_time = BQField('enrollment_status_v3_1_participant_plus_basics_time',
+                                                               BQFieldTypeEnum.DATETIME, BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_1_core_minus_pm_time = BQField('enrollment_status_v3_1_core_minus_pm_time',
+                                                        BQFieldTypeEnum.DATETIME, BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_1_core_time = BQField('enrollment_status_v3_1_core_time', BQFieldTypeEnum.DATETIME,
+                                               BQFieldModeEnum.NULLABLE)
+    enrollment_status_v3_1_participant_plus_baseline_time = \
+        BQField('enrollment_status_v3_1_participant_plus_baseline_time', BQFieldTypeEnum.DATETIME,
+                BQFieldModeEnum.NULLABLE)
+    health_datastream_sharing_status_v3_1 = BQField('health_datastream_sharing_status_v3_1',
+                                                    BQFieldTypeEnum.STRING, BQFieldModeEnum.NULLABLE)
+    health_datastream_sharing_status_v3_1_id = BQField('health_datastream_sharing_status_v3_1_id',
+                                                       BQFieldTypeEnum.INTEGER, BQFieldModeEnum.NULLABLE)
+    health_datastream_sharing_status_v3_1_time = BQField('health_datastream_sharing_status_v3_1_time',
+                                                         BQFieldTypeEnum.DATETIME, BQFieldModeEnum.NULLABLE)
 
 class BQParticipantSummary(BQTable):
     """ Participant Summary BigQuery Table """

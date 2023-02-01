@@ -18,7 +18,7 @@ from rdr_service.genomic.genomic_job_components import ManifestDefinitionProvide
 from rdr_service.model.config_utils import to_client_biobank_id
 from rdr_service.model.genomics import GenomicGCValidationMetrics, GenomicSetMember
 from rdr_service.model.participant_summary import ParticipantSummary
-from rdr_service.offline import genomic_pipeline
+from rdr_service.offline import genomic_pipeline, genomic_cvl_pipeline
 from rdr_service.participant_enums import QuestionnaireStatus, WithdrawalStatus
 from tests.genomics_tests.test_genomic_pipeline import create_ingestion_test_file
 from tests.helpers.unittest_base import BaseTestCase
@@ -50,13 +50,8 @@ class GenomicCVLPipelineTest(BaseTestCase):
                 genomicSetId=self.gen_set.id,
                 biobankId=f"{num}",
                 sampleId=f"100{num}",
-                genomeType="aou_wgs"
-            )
-
-            self.data_generator.create_database_genomic_result_workflow_state(
-                genomic_set_member_id=member.id,
-                results_workflow_state=kwargs.get('current_results_workflow_state'),
-                results_module=kwargs.get('results_module')
+                genomeType="aou_wgs",
+                cvlW3srManifestJobRunID=kwargs.get('cvl_w3sr_manifest_job_run_id')
             )
 
             if kwargs.get('set_cvl_analysis_records'):
@@ -94,7 +89,6 @@ class GenomicCVLPipelineTest(BaseTestCase):
             test_file='RDR_AoU_CVL_W2SC.csv',
             job_id=GenomicJob.CVL_W2SC_WORKFLOW,
             manifest_type=GenomicManifestTypes.CVL_W2SC,
-            current_results_workflow_state=ResultsWorkflowState.CVL_W1IL,
             results_module=ResultsModuleType.HDRV1
         )
 
@@ -130,7 +124,6 @@ class GenomicCVLPipelineTest(BaseTestCase):
             test_file='RDR_AoU_CVL_W2SC.csv',
             job_id=GenomicJob.CVL_W2SC_WORKFLOW,
             manifest_type=GenomicManifestTypes.CVL_W2SC,
-            results_workflow_state=ResultsWorkflowState.CVL_W1IL,
             results_module=ResultsModuleType.HDRV1
         )
 
@@ -166,7 +159,7 @@ class GenomicCVLPipelineTest(BaseTestCase):
                 consentForGenomicsROR=QuestionnaireStatus.SUBMITTED,
                 consentForStudyEnrollment=QuestionnaireStatus.SUBMITTED
             )
-            member = self.data_generator.create_database_genomic_set_member(
+            self.data_generator.create_database_genomic_set_member(
                 genomicSetId=self.gen_set.id,
                 biobankId=summary.biobankId,
                 sampleId=f"100{num}",
@@ -178,12 +171,6 @@ class GenomicCVLPipelineTest(BaseTestCase):
                 genomeType="aou_wgs",
                 participantId=summary.participantId,
                 cvlW2scManifestJobRunID=cvl_w2sc_gen_job_run.id
-            )
-
-            self.data_generator.create_database_genomic_result_workflow_state(
-                genomic_set_member_id=member.id,
-                results_workflow_state=ResultsWorkflowState.CVL_W2SC,
-                results_module=ResultsModuleType.HDRV1
             )
 
         gc_site_ids = ['bi', 'uw', 'bcm']
@@ -201,7 +188,7 @@ class GenomicCVLPipelineTest(BaseTestCase):
 
         # main workflow
         with clock.FakeClock(fake_date):
-            genomic_pipeline.cvl_w3sr_manifest_workflow()
+            genomic_cvl_pipeline.cvl_w3sr_manifest_workflow()
 
         current_members = self.member_dao.get_all()
 
@@ -335,7 +322,6 @@ class GenomicCVLPipelineTest(BaseTestCase):
             test_file='RDR_AoU_CVL_W3NS.csv',
             job_id=GenomicJob.CVL_W3NS_WORKFLOW,
             manifest_type=GenomicManifestTypes.CVL_W3NS,
-            current_results_workflow_state=ResultsWorkflowState.CVL_W3SR,
             results_module=ResultsModuleType.HDRV1
         )
 
@@ -371,7 +357,6 @@ class GenomicCVLPipelineTest(BaseTestCase):
             test_file='RDR_AoU_CVL_W3NS.csv',
             job_id=GenomicJob.CVL_W3NS_WORKFLOW,
             manifest_type=GenomicManifestTypes.CVL_W3NS,
-            current_results_workflow_state=ResultsWorkflowState.CVL_W3SR,
             results_module=ResultsModuleType.HDRV1
         )
 
@@ -395,12 +380,18 @@ class GenomicCVLPipelineTest(BaseTestCase):
 
     def test_w3sc_manifest_ingestion(self):
 
+        initial_w3sr_job_run_id = self.data_generator.create_database_genomic_job_run(
+            jobId=GenomicJob.CVL_W3SR_WORKFLOW,
+            startTime=clock.CLOCK.now(),
+            runResult=GenomicSubProcessResult.SUCCESS
+        ).id
+
         self.execute_base_cvl_ingestion(
             test_file='RDR_AoU_CVL_W3SC.csv',
             job_id=GenomicJob.CVL_W3SC_WORKFLOW,
             manifest_type=GenomicManifestTypes.CVL_W3SC,
-            current_results_workflow_state=ResultsWorkflowState.CVL_W3SR,
-            results_module=ResultsModuleType.HDRV1
+            results_module=ResultsModuleType.HDRV1,
+            cvl_w3sr_manifest_job_run_id=initial_w3sr_job_run_id
         )
 
         current_members = self.member_dao.get_all()
@@ -415,6 +406,8 @@ class GenomicCVLPipelineTest(BaseTestCase):
         self.assertTrue(len(self.file_processed_dao.get_all()), 1)
         w3sc_file_processed = self.file_processed_dao.get(1)
         self.assertTrue(w3sc_file_processed.runId, w3sc_job_run.jobId)
+
+        self.assertTrue(all(obj.cvlW3srManifestJobRunID is None for obj in current_members))
 
         self.assertTrue(all(obj.cvlW3scManifestJobRunID is not None for obj in current_members))
         self.assertTrue(all(obj.cvlW3scManifestJobRunID == w3sc_job_run.id for obj in current_members))
@@ -437,7 +430,6 @@ class GenomicCVLPipelineTest(BaseTestCase):
             test_file='RDR_AoU_CVL_W3SC.csv',
             job_id=GenomicJob.CVL_W3SC_WORKFLOW,
             manifest_type=GenomicManifestTypes.CVL_W3SC,
-            current_results_workflow_state=ResultsWorkflowState.CVL_W3SR,
             results_module=ResultsModuleType.HDRV1
         )
 
@@ -465,7 +457,6 @@ class GenomicCVLPipelineTest(BaseTestCase):
             test_file='RDR_AoU_CVL_PKG-1911-229228.csv',
             job_id=GenomicJob.CVL_W3SS_WORKFLOW,
             manifest_type=GenomicManifestTypes.CVL_W3SS,
-            current_results_workflow_state=ResultsWorkflowState.CVL_W3NS,
             results_module=ResultsModuleType.HDRV1,
             include_timestamp=False
         )
@@ -537,7 +528,6 @@ class GenomicCVLPipelineTest(BaseTestCase):
             test_file='RDR_AoU_CVL_W4WR_HDRV1.csv',
             job_id=GenomicJob.CVL_W4WR_WORKFLOW,
             manifest_type=GenomicManifestTypes.CVL_W4WR,
-            current_results_workflow_state=ResultsWorkflowState.CVL_W1IL,
             results_module=ResultsModuleType.HDRV1
         )
 
@@ -586,7 +576,6 @@ class GenomicCVLPipelineTest(BaseTestCase):
             test_file='RDR_AoU_CVL_W4WR_HDRV1.csv',
             job_id=GenomicJob.CVL_W4WR_WORKFLOW,
             manifest_type=GenomicManifestTypes.CVL_W4WR,
-            current_results_workflow_state=ResultsWorkflowState.CVL_W1IL,
             results_module=ResultsModuleType.HDRV1
         )
 
@@ -612,12 +601,12 @@ class GenomicCVLPipelineTest(BaseTestCase):
     def test_w5nf_manifest_ingestion(self):
 
         self.execute_base_cvl_ingestion(
-            test_file='RDR_AoU_CVL_W5NF_HDRV1_1.csv',
+            test_file='RDR_AoU_CVL_W5NF_HDRV1.csv',
             job_id=GenomicJob.CVL_W5NF_WORKFLOW,
             manifest_type=GenomicManifestTypes.CVL_W5NF,
-            current_results_workflow_state=ResultsWorkflowState.CVL_W4WR,
             results_module=ResultsModuleType.HDRV1,
-            set_cvl_analysis_records=True  # need to set initial cvl analysis records from W4WR
+            set_cvl_analysis_records=True,  # need to set initial cvl analysis records from W4WR
+            include_sub_num=True
         )
 
         current_members = self.member_dao.get_all()
@@ -651,11 +640,9 @@ class GenomicCVLPipelineTest(BaseTestCase):
         current_analysis_results = cvl_analysis_dao.get_all()
 
         failed_analysis_records = list(filter(lambda x: x.failed == 1, current_analysis_results))
-        new_analysis_records = list(filter(lambda x: x.failed == 0, current_analysis_results))
-
         member_ids = [obj.id for obj in current_members]
 
-        self.assertEqual(len(current_analysis_results), len(current_members) * 2)
+        self.assertEqual(len(current_analysis_results), len(current_members))
         self.assertTrue(all(obj.clinical_analysis_type is not None for obj in current_analysis_results))
         self.assertTrue(all(obj.health_related_data_file_name is not None for obj in current_analysis_results))
         self.assertTrue(all(obj.clinical_analysis_type == 'HDRV1' for obj in current_analysis_results))
@@ -664,18 +651,15 @@ class GenomicCVLPipelineTest(BaseTestCase):
         self.assertTrue(all(obj.failed_request_reason is not None for obj in failed_analysis_records))
         self.assertTrue(all(obj.failed_request_reason_free is not None for obj in failed_analysis_records))
 
-        self.assertTrue(all(obj.genomic_set_member_id in member_ids for obj in new_analysis_records))
-        self.assertTrue(all(obj.failed_request_reason is None for obj in new_analysis_records))
-        self.assertTrue(all(obj.failed_request_reason_free is None for obj in new_analysis_records))
-
     def test_w5nf_manifest_to_raw_ingestion(self):
 
         self.execute_base_cvl_ingestion(
-            test_file='RDR_AoU_CVL_W5NF_HDRV1_1.csv',
+            test_file='RDR_AoU_CVL_W5NF_HDRV1.csv',
             job_id=GenomicJob.CVL_W5NF_WORKFLOW,
             manifest_type=GenomicManifestTypes.CVL_W5NF,
             current_results_workflow_state=ResultsWorkflowState.CVL_W1IL,
-            results_module=ResultsModuleType.HDRV1
+            results_module=ResultsModuleType.HDRV1,
+            include_sub_num=True
         )
 
         w5nf_raw_dao = GenomicW5NFRawDao()
@@ -818,14 +802,14 @@ class GenomicW1ilGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
             sql_exporter_class_mock,
             {
                 config.getSetting(config.BCM_BUCKET_NAME): {
-                    f'W1IL_manifests/BCM_AoU_CVL_W1IL_{ResultsModuleType.PGXV1.name}'
+                    f'W1IL_manifests_pgx/BCM_AoU_CVL_W1IL_{ResultsModuleType.PGXV1.name}'
                     f'_{manifest_file_timestamp_str}.csv': bcm_pgx_w1il_manifest,
-                    f'W1IL_manifests/BCM_AoU_CVL_W1IL_{ResultsModuleType.HDRV1.name}'
+                    f'W1IL_manifests_hdr/BCM_AoU_CVL_W1IL_{ResultsModuleType.HDRV1.name}'
                     f'_{manifest_file_timestamp_str}.csv':
                         bcm_hdr_w1il_manifest
                 },
                 config.getSetting(config.CO_BUCKET_NAME): {
-                    f'W1IL_manifests/CO_AoU_CVL_W1IL_{ResultsModuleType.PGXV1.name}'
+                    f'W1IL_manifests_pgx/CO_AoU_CVL_W1IL_{ResultsModuleType.PGXV1.name}'
                     f'_{manifest_file_timestamp_str}.csv': co_w1il_manifest
                 }
             }
@@ -833,7 +817,7 @@ class GenomicW1ilGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
 
         # Check for PGX manifests
         with clock.FakeClock(manifest_generation_datetime):
-            genomic_pipeline.cvl_w1il_manifest_workflow(
+            genomic_cvl_pipeline.cvl_w1il_manifest_workflow(
                 cvl_site_bucket_map=self._get_cvl_bucket_map(),
                 module_type='pgx'
             )
@@ -843,7 +827,7 @@ class GenomicW1ilGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
             ('biobank_id', 'sample_id', 'vcf_raw_path', 'vcf_raw_index_path', 'vcf_raw_md5_path',
              'gvcf_path', 'gvcf_md5_path', 'cram_name', 'sex_at_birth', 'ny_flag', 'genome_center', 'consent_for_gror',
              'genome_type', 'informing_loop_pgx',
-             'aou_hdr_coverage', 'contamination'),
+             'aou_hdr_coverage', 'contamination', 'sex_ploidy'),
             self.get_manifest_headers(bcm_pgx_w1il_manifest)
         )
 
@@ -909,7 +893,7 @@ class GenomicW1ilGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
 
         # check for hdr manifest
         with clock.FakeClock(manifest_generation_datetime):
-            genomic_pipeline.cvl_w1il_manifest_workflow(
+            genomic_cvl_pipeline.cvl_w1il_manifest_workflow(
                 cvl_site_bucket_map=self._get_cvl_bucket_map(),
                 module_type='hdr'
             )
@@ -918,14 +902,17 @@ class GenomicW1ilGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
         self.assertTupleEqual(
             ('biobank_id', 'sample_id', 'vcf_raw_path', 'vcf_raw_index_path', 'vcf_raw_md5_path', 'gvcf_path', 'gvcf_md5_path',
              'cram_name', 'sex_at_birth', 'ny_flag', 'genome_center', 'consent_for_gror', 'genome_type',
-             'informing_loop_hdr', 'aou_hdr_coverage', 'contamination'),
+             'informing_loop_hdr', 'aou_hdr_coverage', 'contamination', 'sex_ploidy'),
             self.get_manifest_headers(bcm_hdr_w1il_manifest)
         )
 
         self.assert_manifest_has_rows(
             manifest_cloud_writer_mock=bcm_hdr_w1il_manifest,
             expected_rows=[
-                self.expected_w1il_row(self.hdr_and_pgx_set_member, self.hdr_and_pgx_validation_metrics, self.hdr_and_pgx_summary)
+                self.expected_w1il_row(
+                    self.hdr_and_pgx_set_member,
+                    self.hdr_and_pgx_validation_metrics,
+                    self.hdr_and_pgx_summary)
             ]
         )
 
@@ -970,7 +957,7 @@ class GenomicW1ilGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
         w1il_raw_dao = GenomicW1ILRawDao()
         # PGX manifest
         with clock.FakeClock(clock.CLOCK.now()):
-            genomic_pipeline.cvl_w1il_manifest_workflow(
+            genomic_cvl_pipeline.cvl_w1il_manifest_workflow(
                 cvl_site_bucket_map=self._get_cvl_bucket_map(),
                 module_type='pgx'
             )
@@ -1000,10 +987,11 @@ class GenomicW1ilGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
 
         self.assertTrue(all(obj.aou_hdr_coverage is not None for obj in pgx_raw_records))
         self.assertTrue(all(obj.contamination is not None for obj in pgx_raw_records))
+        self.assertTrue(all(obj.sex_ploidy is not None for obj in pgx_raw_records))
 
         # HDR manifest
         with clock.FakeClock(clock.CLOCK.now()):
-            genomic_pipeline.cvl_w1il_manifest_workflow(
+            genomic_cvl_pipeline.cvl_w1il_manifest_workflow(
                 cvl_site_bucket_map=self._get_cvl_bucket_map(),
                 module_type='hdr'
             )
@@ -1033,6 +1021,7 @@ class GenomicW1ilGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
 
         self.assertTrue(all(obj.aou_hdr_coverage is not None for obj in hdr_raw_records))
         self.assertTrue(all(obj.contamination is not None for obj in hdr_raw_records))
+        self.assertTrue(all(obj.sex_ploidy is not None for obj in hdr_raw_records))
 
     def _generate_cvl_participant(
         self,
@@ -1113,14 +1102,6 @@ class GenomicW1ilGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
                 'sexConcordance': 'true',
                 'drcSexConcordance': 'pass',
                 'drcFpConcordance': 'pass',
-                'hfVcfReceived': 1,
-                'hfVcfTbiReceived': 1,
-                'hfVcfMd5Received': 1,
-                'cramReceived': 1,
-                'cramMd5Received': 1,
-                'craiReceived': 1,
-                'gvcfReceived': 1,
-                'gvcfMd5Received': 1,
                 'hfVcfPath': self.fake.pystr(),
                 'hfVcfTbiPath': self.fake.pystr(),
                 'hfVcfMd5Path': self.fake.pystr(),
@@ -1128,7 +1109,8 @@ class GenomicW1ilGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
                 'gvcfMd5Path': self.fake.pystr(),
                 'cramPath': self.fake.pystr(),
                 'aouHdrCoverage': self.fake.pyfloat(right_digits=4, min_value=0, max_value=100),
-                'contamination': self.fake.pyfloat(right_digits=4, min_value=0, max_value=100)
+                'contamination': self.fake.pyfloat(right_digits=4, min_value=0, max_value=100),
+                'sexPloidy': self.fake.pystr(1, 10)
             },
             **validation_metrics_params
         }
@@ -1157,7 +1139,8 @@ class GenomicW1ilGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
             'aou_cvl',  # genome type
             'Y',  # informing loop decision
             str(validation_metrics.aouHdrCoverage),
-            str(validation_metrics.contamination)
+            str(validation_metrics.contamination),
+            str(validation_metrics.sexPloidy)
         )
 
 
@@ -1174,26 +1157,14 @@ class GenomicW2wGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
         self.first_withdrawn_member, self.first_summary = self._generate_participant_data(
             set_member_params={'gcSiteId': 'bcm'},
             withdrawal_status=WithdrawalStatus.NO_USE,
-            results_workflow_state_params={
-                'results_workflow_state': ResultsWorkflowState.CVL_W2SC,
-                'results_module': ResultsModuleType.HDRV1,
-            }
         )
         self.second_withdrawn_member, self.second_summary = self._generate_participant_data(
             set_member_params={'gcSiteId': 'bcm'},
             withdrawal_status=WithdrawalStatus.NO_USE,
-            results_workflow_state_params={
-                'results_workflow_state': ResultsWorkflowState.CVL_W2SC,
-                'results_module': ResultsModuleType.HDRV1,
-            }
         )
         self.co_withdrawal, self.co_summary = self._generate_participant_data(
             set_member_params={'gcSiteId': 'bi'},
             withdrawal_status=WithdrawalStatus.EARLY_OUT,
-            results_workflow_state_params={
-                'results_workflow_state': ResultsWorkflowState.CVL_W2SC,
-                'results_module': ResultsModuleType.HDRV1,
-            }
         )
 
         # Generate some participants that should not appear on the W2W manifest
@@ -1233,7 +1204,7 @@ class GenomicW2wGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
         )
 
         with clock.FakeClock(manifest_generation_datetime):
-            genomic_pipeline.cvl_w2w_manifest_workflow(cvl_site_bucket_map=self._get_cvl_bucket_map())
+            genomic_cvl_pipeline.cvl_w2w_manifest_workflow(cvl_site_bucket_map=self._get_cvl_bucket_map())
 
         # Check that the expected headers are written
         self.assertTupleEqual(
@@ -1296,7 +1267,7 @@ class GenomicW2wGenerationTest(ManifestGenerationTestMixin, BaseTestCase):
         w2w_raw_dao = GenomicW2WRawDao()
 
         with clock.FakeClock(clock.CLOCK.now()):
-            genomic_pipeline.cvl_w2w_manifest_workflow(
+            genomic_cvl_pipeline.cvl_w2w_manifest_workflow(
                 cvl_site_bucket_map=self._get_cvl_bucket_map()
             )
 
@@ -1485,7 +1456,7 @@ class GenomicCVLReconcileTest(BaseTestCase):
 
         # config item => 3 => should not find samples
         with clock.FakeClock(fake_plus_one):
-            genomic_pipeline.reconcile_cvl_results(
+            genomic_cvl_pipeline.reconcile_cvl_results(
                 reconcile_job_type=GenomicJob.RECONCILE_CVL_PGX_RESULTS
             )
 
@@ -1494,7 +1465,7 @@ class GenomicCVLReconcileTest(BaseTestCase):
 
         # config item => 3 => should find samples
         with clock.FakeClock(fake_plus_four):
-            genomic_pipeline.reconcile_cvl_results(
+            genomic_cvl_pipeline.reconcile_cvl_results(
                 reconcile_job_type=GenomicJob.RECONCILE_CVL_PGX_RESULTS
             )
 
@@ -1538,7 +1509,7 @@ class GenomicCVLReconcileTest(BaseTestCase):
 
         # config item => 3 => should not find samples
         with clock.FakeClock(fake_plus_one):
-            genomic_pipeline.reconcile_cvl_results(
+            genomic_cvl_pipeline.reconcile_cvl_results(
                 reconcile_job_type=GenomicJob.RECONCILE_CVL_HDR_RESULTS
             )
 
@@ -1547,7 +1518,7 @@ class GenomicCVLReconcileTest(BaseTestCase):
 
         # config item => 3 => should find samples => criteria 1
         with clock.FakeClock(fake_plus_four):
-            genomic_pipeline.reconcile_cvl_results(
+            genomic_cvl_pipeline.reconcile_cvl_results(
                 reconcile_job_type=GenomicJob.RECONCILE_CVL_HDR_RESULTS
             )
 
@@ -1584,7 +1555,7 @@ class GenomicCVLReconcileTest(BaseTestCase):
 
         # config item => 3 + 2 => should find samples => criteria 2
         with clock.FakeClock(fake_plus_six):
-            genomic_pipeline.reconcile_cvl_results(
+            genomic_cvl_pipeline.reconcile_cvl_results(
                 reconcile_job_type=GenomicJob.RECONCILE_CVL_HDR_RESULTS
             )
 
@@ -1628,7 +1599,7 @@ class GenomicCVLReconcileTest(BaseTestCase):
                 cvl_site_id='rdr'
             )
 
-        genomic_pipeline.reconcile_cvl_results(
+        genomic_cvl_pipeline.reconcile_cvl_results(
             reconcile_job_type=GenomicJob.RECONCILE_CVL_RESOLVE
         )
 
@@ -1642,7 +1613,7 @@ class GenomicCVLReconcileTest(BaseTestCase):
                 clinical_analysis_type=result_type
             )
 
-        genomic_pipeline.reconcile_cvl_results(
+        genomic_cvl_pipeline.reconcile_cvl_results(
             reconcile_job_type=GenomicJob.RECONCILE_CVL_RESOLVE
         )
 
@@ -1681,7 +1652,7 @@ class GenomicCVLReconcileTest(BaseTestCase):
                 cvl_site_id=cvl_site_id
             )
 
-        genomic_pipeline.reconcile_cvl_results(
+        genomic_cvl_pipeline.reconcile_cvl_results(
             reconcile_job_type=GenomicJob.RECONCILE_CVL_ALERTS
         )
 

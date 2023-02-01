@@ -11,6 +11,7 @@ import tempfile
 
 from contextlib import ContextDecorator
 from abc import ABC, abstractmethod
+from typing import List
 
 from google.api_core.exceptions import RequestRangeNotSatisfiable
 from google.cloud import storage
@@ -58,6 +59,10 @@ class StorageProvider(Provider, ABC):
 
     @abstractmethod
     def exists(self, path):
+        pass
+
+    @abstractmethod
+    def change_file_storage_class(self, source_path, storage_class):
         pass
 
 
@@ -150,6 +155,9 @@ class LocalFilesystemStorageProvider(StorageProvider):
 
     def get_local_path(self, path):
         return self._get_local_path(path)
+
+    def change_file_storage_class(self, source_path, storage_class):
+        ...
 
     @staticmethod
     def _make_blob(*args, **kw):
@@ -360,6 +368,21 @@ class GoogleCloudStorageProvider(StorageProvider):
     def _parse_bucket(bucket):
         bucket = bucket if bucket[0:1] != '/' else bucket[1:]
         return bucket
+
+    def change_file_storage_class(self, source_path: List[str], storage_class: str):
+        storage_client = storage.Client()
+        if type(source_path) is not list:
+            source_bucket_name, source_blob_name = self._parse_path(source_path)
+            bucket = storage_client.get_bucket(source_bucket_name)
+            blob = bucket.get_blob(source_blob_name)
+            blob.update_storage_class(storage_class)
+            return blob
+
+        for path in source_path:
+            source_bucket_name, source_blob_name = self._parse_path(path)
+            bucket = storage_client.get_bucket(source_bucket_name)
+            blob = bucket.get_blob(source_blob_name)
+            blob.update_storage_class(storage_class)
 
 
 def get_storage_provider():

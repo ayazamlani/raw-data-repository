@@ -8,8 +8,7 @@ from rdr_service.resource import Schema, fields
 from rdr_service.resource.constants import SchemaID
 
 from rdr_service.genomic_enums import GenomicSetStatus, GenomicSetMemberStatus, GenomicJob, GenomicWorkflowState, \
-    GenomicSubProcessStatus, GenomicSubProcessResult, GenomicManifestTypes, GenomicContaminationCategory, \
-    GenomicQcStatus
+    GenomicSubProcessStatus, GenomicSubProcessResult, GenomicManifestTypes, GenomicQcStatus
 
 
 class GenomicSetSchema(Schema):
@@ -244,10 +243,10 @@ class GenomicManifestFeedbackSchema(Schema):
 class GenomicGCValidationMetricsSchema(Schema):
 
     id = fields.Int32()
-    genomic_set_member_id = fields.Int32()
-    genomic_file_processed_id = fields.Int32()
     created = fields.DateTime()
     modified = fields.DateTime()
+    genomic_set_member_id = fields.Int32()
+    genomic_file_processed_id = fields.Int32()
     lims_id = fields.String(validate=validate.Length(max=80))
     call_rate = fields.String(validate=validate.Length(max=10))
     mean_coverage = fields.String(validate=validate.Length(max=10))
@@ -258,22 +257,7 @@ class GenomicGCValidationMetricsSchema(Schema):
     notes = fields.String(validate=validate.Length(max=128))
     site_id = fields.String(validate=validate.Length(max=80))
     chipwellbarcode = fields.String(validate=validate.Length(max=80))
-    idat_green_received = fields.Int16()
-    idat_red_received = fields.Int16()
-    vcf_received = fields.Int16()
-    crai_received = fields.Int16()
-    cram_md5_received = fields.Int16()
-    cram_received = fields.Int16()
-    hf_vcf_md5_received = fields.Int16()
-    hf_vcf_received = fields.Int16()
-    hf_vcf_tbi_received = fields.Int16()
-    raw_vcf_md5_received = fields.Int16()
-    raw_vcf_received = fields.Int16()
-    raw_vcf_tbi_received = fields.Int16()
     sex_ploidy = fields.String(validate=validate.Length(max=10))
-    idat_green_md5_received = fields.Int16()
-    idat_red_md5_received = fields.Int16()
-    vcf_md5_received = fields.Int16()
     crai_path = fields.String(validate=validate.Length(max=255))
     cram_md5_path = fields.String(validate=validate.Length(max=255))
     cram_path = fields.String(validate=validate.Length(max=255))
@@ -289,44 +273,47 @@ class GenomicGCValidationMetricsSchema(Schema):
     raw_vcf_tbi_path = fields.String(validate=validate.Length(max=255))
     vcf_md5_path = fields.String(validate=validate.Length(max=255))
     vcf_path = fields.String(validate=validate.Length(max=255))
-    aligned_q30_bases = fields.Int32()
+    aligned_q30_bases = fields.Int64()
     array_concordance = fields.String(validate=validate.Length(max=10))
     aou_hdr_coverage = fields.String(validate=validate.Length(max=10))
     vcf_tbi_path = fields.String(validate=validate.Length(max=255))
-    vcf_tbi_received = fields.Int16()
-    ignore_flag = fields.Int16()
     dev_note = fields.String(validate=validate.Length(max=255))
-    contamination_category = fields.EnumString(enum=GenomicContaminationCategory)
-    contamination_category_id = fields.EnumInteger(enum=GenomicContaminationCategory)
-    idat_green_deleted = fields.Int16()
-    idat_red_deleted = fields.Int16()
-    vcf_deleted = fields.Int16()
+    ignore_flag = fields.Int16()
+    contamination_category = fields.String(validate=validate.Length(max=64))
+    contamination_category_id = fields.Int16()
     crai_deleted = fields.Int16()
-    cram_md5_deleted = fields.Int16()
     cram_deleted = fields.Int16()
-    hf_vcf_md5_deleted = fields.Int16()
+    cram_md5_deleted = fields.Int16()
     hf_vcf_deleted = fields.Int16()
+    hf_vcf_md5_deleted = fields.Int16()
     hf_vcf_tbi_deleted = fields.Int16()
-    raw_vcf_md5_deleted = fields.Int16()
-    raw_vcf_deleted = fields.Int16()
-    raw_vcf_tbi_deleted = fields.Int16()
+    idat_green_deleted = fields.Int16()
     idat_green_md5_deleted = fields.Int16()
+    idat_red_deleted = fields.Int16()
     idat_red_md5_deleted = fields.Int16()
+    raw_vcf_deleted = fields.Int16()
+    raw_vcf_md5_deleted = fields.Int16()
+    raw_vcf_tbi_deleted = fields.Int16()
+    vcf_deleted = fields.Int16()
     vcf_md5_deleted = fields.Int16()
     vcf_tbi_deleted = fields.Int16()
-    drc_sex_concordance = fields.String(validate=validate.Length(max=128))
-    drc_contamination = fields.String(validate=validate.Length(max=128))
-    drc_mean_coverage = fields.String(validate=validate.Length(max=128))
-    drc_fp_concordance = fields.String(validate=validate.Length(max=128))
-    gvcf_path = fields.String(validate=validate.Length(max=512))
-    gvcf_received = fields.Int16()
+    drc_call_rate = fields.String(validate=validate.Length(max=255))
+    drc_contamination = fields.String(validate=validate.Length(max=255))
+    drc_fp_concordance = fields.String(validate=validate.Length(max=255))
+    drc_mean_coverage = fields.String(validate=validate.Length(max=255))
+    drc_sex_concordance = fields.String(validate=validate.Length(max=255))
     gvcf_deleted = fields.Int16()
-    gvcf_md5_path = fields.String(validate=validate.Length(max=255))
-    gvcf_md5_received = fields.Int16()
     gvcf_md5_deleted = fields.Int16()
-    drc_call_rate = fields.String(validate=validate.Length(max=128))
-    pipeline_id = fields.String(validate=validate.Length(max=128))
+    gvcf_md5_path = fields.String(validate=validate.Length(max=512))
+    gvcf_path = fields.String(validate=validate.Length(max=512))
     mapped_reads_pct = fields.String(validate=validate.Length(max=10))
+    pipeline_id = fields.String(validate=validate.Length(max=255))
+    # DA-3072, PDR-1435 - WGS Reprocessing and Pipeline Upgrade columns
+    processing_count = fields.Int16()
+    aw3_ready_flag = fields.Int16()
+    aw3_manifest_job_run_id = fields.Int32()
+    aw3_manifest_file_id = fields.Int32()
+    aw4_manifest_job_run_id = fields.Int32()
 
     class Meta:
         schema_id = SchemaID.genomic_gc_validation_metrics
@@ -379,3 +366,95 @@ class GenomicInformingLoopSchema(Schema):
         resource_pk_field = 'id'
         pii_fields = ()  # List fields that contain PII data.
         pii_filter = {}  # dict(field: lambda function).
+
+class GenomicCVLResultPastDueSchema(Schema):
+
+    id = fields.Int32()
+    created = fields.DateTime()
+    modified = fields.DateTime()
+    genomic_set_member_id = fields.Int32()
+    sample_id = fields.String(validate=validate.Length(max=255))
+    results_type = fields.String(validate=validate.Length(max=128))
+    cvl_site_id = fields.String(validate=validate.Length(max=128))
+    email_notification_sent = fields.Int16()
+    email_notification_sent_date = fields.DateTime()
+    resolved = fields.Int16()
+    resolved_date = fields.DateTime()
+
+    class Meta:
+        schema_id = SchemaID.genomic_cvl_result_past_due
+        resource_uri = 'GenomicCVLResultPastDue'
+        resource_pk_field = 'id'
+        pii_fields = ()  # List fields that contain PII data.
+        pii_filter = {}  # dict(field: lambda function)
+
+class GenomicMemberReportStateSchema(Schema):
+
+    id = fields.Int32()
+    created = fields.DateTime()
+    modified = fields.DateTime()
+    genomic_set_member_id = fields.Int32()
+    genomic_report_state = fields.Int16()
+    module = fields.String(validate=validate.Length(max=128))
+    participant_id = fields.String(validate=validate.Length(max=10))
+    genomic_report_state_str = fields.String(validate=validate.Length(max=128))
+    event_authored_time = fields.DateTime()
+    event_type = fields.String(validate=validate.Length(max=128))
+    message_record_id = fields.Int16()
+    sample_id = fields.String(validate=validate.Length(max=128))
+    report_revision_number = fields.Int16()
+
+    class Meta:
+        schema_id = SchemaID.genomic_member_report_state
+        resource_uri = 'GenomicMemberReportState'
+        resource_pk_field = 'id'
+        pii_fields = ()  # List fields that contain PII data.
+        pii_filter = {}  # dict(field: lambda function)
+
+class GenomicResultViewedSchema(Schema):
+
+    id = fields.Int32()
+    created = fields.DateTime()
+    modified = fields.DateTime()
+    message_record_id = fields.Int32()
+    participant_id = fields.String(validate=validate.Length(max=10))
+    event_type = fields.String(validate=validate.Length(max=256))
+    event_authored_time = fields.DateTime()
+    module_type = fields.String(validate=validate.Length(max=128))
+    first_viewed = fields.DateTime()
+    last_viewed = fields.DateTime()
+    sample_id = fields.String(validate=validate.Length(max=80))
+
+    class Meta:
+        schema_id = SchemaID.genomic_result_viewed
+        resource_uri = 'GenomicResultViewed'
+        resource_pk_field = 'id'
+        pii_fields = ()  # List fields that contain PII data.
+        pii_filter = {}  # dict(field: lambda function)
+
+
+class GenomicAppointmentEventSchema(Schema):
+
+    id = fields.Int32()
+    created = fields.DateTime()
+    modified = fields.DateTime()
+    message_record_id = fields.Int32()
+    participant_id = fields.String(validate=validate.Length(max=10))
+    event_type = fields.String(validate=validate.Length(max=256))
+    event_authored_time = fields.DateTime()
+    module_type = fields.String(validate=validate.Length(max=255))
+    appointment_id = fields.Int32()
+    source = fields.String(validate=validate.Length(max=255))
+    location = fields.String(validate=validate.Length(max=255))
+    contact_number = fields.String(validate=validate.Length(max=255))
+    language = fields.String(validate=validate.Length(max=255))
+    cancellation_reason = fields.String(validate=validate.Length(max=255))
+    appointment_timezone = fields.String(validate=validate.Length(max=255))
+    appointment_timestamp = fields.DateTime()
+
+    class Meta:
+        schema_id = SchemaID.genomic_appointment_event
+        resource_uri = 'GenomicAppointmentEvent'
+        resource_pk_field = 'id'
+        pii_fields = ()  # List fields that contain PII data.
+        pii_filter = {}  # dict(field: lambda function)

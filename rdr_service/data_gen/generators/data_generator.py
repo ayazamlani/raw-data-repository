@@ -17,7 +17,8 @@ from rdr_service.model.genomics import GenomicManifestFeedback, GenomicManifestF
     GenomicSetMember, GenomicAW1Raw, GenomicAW2Raw, GenomicFileProcessed, GenomicIncident, GenomicGCValidationMetrics, \
     GenomicMemberReportState, UserEventMetrics, GenomicInformingLoop, GenomicGcDataFile, GenomicGcDataFileMissing, \
     GenomicResultViewed, GenomicResultWorkflowState, GenomicCVLAnalysis, GenomicCVLSecondSample, GenomicSampleSwap, \
-    GenomicSampleSwapMember, GenomicCVLResultPastDue, GenomicW4WRRaw, GenomicW3SCRaw
+    GenomicSampleSwapMember, GenomicCVLResultPastDue, GenomicW4WRRaw, GenomicW3SCRaw, GenomicAppointmentEvent, \
+    GenomicAppointmentEventMetrics
 from rdr_service.model.hpo import HPO
 from rdr_service.model.hpro_consent_files import HealthProConsentFile
 from rdr_service.model.log_position import LogPosition
@@ -35,7 +36,8 @@ from rdr_service.model.survey import Survey, SurveyQuestion, SurveyQuestionOptio
 from rdr_service.offline.biobank_samples_pipeline import _PMI_OPS_SYSTEM
 from rdr_service.participant_enums import PatientStatusFlag, QuestionnaireResponseStatus, \
     QuestionnaireResponseClassificationType, UNSET_HPO_ID, WithdrawalStatus, SuspensionStatus, EnrollmentStatus, \
-    DeceasedStatus, DeceasedNotification, DeceasedReportStatus, WithdrawalAIANCeremonyStatus
+    EnrollmentStatusV30, EnrollmentStatusV31, DeceasedStatus, DeceasedNotification, DeceasedReportStatus,\
+    WithdrawalAIANCeremonyStatus
 
 
 class DataGenerator:
@@ -311,9 +313,12 @@ class DataGenerator:
             "withdrawalStatus": WithdrawalStatus.NOT_WITHDRAWN,
             "suspensionStatus": SuspensionStatus.NOT_SUSPENDED,
             "enrollmentStatus": EnrollmentStatus.INTERESTED,
+            "enrollmentStatusV3_0": EnrollmentStatusV30.PARTICIPANT,
+            "enrollmentStatusV3_1": EnrollmentStatusV31.PARTICIPANT,
             "participantOrigin": participant.participantOrigin,
             "deceasedStatus": DeceasedStatus.UNSET,
-            "isEhrDataAvailable": False
+            "isEhrDataAvailable": False,
+            "wasParticipantMediatedEhrAvailable": False
         }
 
         defaults.update(kwargs)
@@ -763,6 +768,10 @@ class DataGenerator:
         self._commit_to_database(result_viewed)
         return result_viewed
 
+    @staticmethod
+    def _genomic_result_workflow_state(**kwargs):
+        return GenomicResultWorkflowState(**kwargs)
+
     def create_database_genomic_result_workflow_state(self, **kwargs):
         m = self._genomic_result_workflow_state(**kwargs)
         self._commit_to_database(m)
@@ -785,10 +794,6 @@ class DataGenerator:
         m = self._genomic_datagen_manifest_schema(**kwargs)
         self._commit_to_database(m)
         return m
-
-    @staticmethod
-    def _genomic_result_workflow_state(**kwargs):
-        return GenomicResultWorkflowState(**kwargs)
 
     def create_database_genomic_cvl_analysis(self, **kwargs):
         m = self._genomic_cvl_analysis(**kwargs)
@@ -861,6 +866,24 @@ class DataGenerator:
     @staticmethod
     def _genomic_w3sc_raw(**kwargs):
         return GenomicW3SCRaw(**kwargs)
+
+    def create_database_genomic_appointment(self, **kwargs):
+        m = self._genomic_appointment_event(**kwargs)
+        self._commit_to_database(m)
+        return m
+
+    @staticmethod
+    def _genomic_appointment_event(**kwargs):
+        return GenomicAppointmentEvent(**kwargs)
+
+    def create_database_genomic_appointment_metric(self, **kwargs):
+        m = self._genomic_appointment_event_metric(**kwargs)
+        self._commit_to_database(m)
+        return m
+
+    @staticmethod
+    def _genomic_appointment_event_metric(**kwargs):
+        return GenomicAppointmentEventMetrics(**kwargs)
 
     def create_withdrawn_participant(self, withdrawal_reason_justification, is_native_american=False,
                                      requests_ceremony=None, withdrawal_time=datetime.utcnow()):

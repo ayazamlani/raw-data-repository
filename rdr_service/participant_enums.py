@@ -83,6 +83,13 @@ class PhysicalMeasurementsCollectType(messages.Enum):
     SELF_REPORTED = 2
 
 
+class SelfReportedPhysicalMeasurementsStatus(messages.Enum):
+    """The state of the participants self-reported physical measurements"""
+
+    UNSET = 0
+    COMPLETED = 1
+
+
 class OriginMeasurementUnit(messages.Enum):
     """The origin unit type of this measurement record"""
     UNSET = 0
@@ -148,6 +155,35 @@ class EnrollmentStatusV2(messages.Enum):
     FULLY_CONSENTED = 2
     CORE_PARTICIPANT = 3
     CORE_MINUS_PM = 4
+
+
+class EnrollmentStatusV30(messages.Enum):
+    """A status reflecting how fully enrolled a participant is according to the 3.0 data glossary"""
+
+    PARTICIPANT = 1
+    PARTICIPANT_PLUS_EHR = 2
+    PARTICIPANT_PMB_ELIGIBLE = 3
+    CORE_MINUS_PM = 4
+    CORE_PARTICIPANT = 5
+
+
+class EnrollmentStatusV31(messages.Enum):
+    """A status reflecting how fully enrolled a participant is according to the 3.1 data glossary"""
+
+    PARTICIPANT = 1
+    PARTICIPANT_PLUS_EHR = 2
+    PARTICIPANT_PLUS_BASICS = 3
+    CORE_MINUS_PM = 4
+    CORE_PARTICIPANT = 5
+    BASELINE_PARTICIPANT = 6
+
+
+class DigitalHealthSharingStatusV31(messages.Enum):
+    """Provides whether EHR files have been or currently are available for the participant"""
+
+    NEVER_SHARED = 1
+    EVER_SHARED = 2
+    CURRENTLY_SHARING = 3
 
 
 class SampleStatus(messages.Enum):
@@ -256,6 +292,14 @@ class BiobankOrderStatus(messages.Enum):
     CANCELLED = 2
 
 
+class NPHBiosampleOrderStatus(messages.Enum):
+    """ The status of a biobank order: amended/cancelled """
+
+    UNSET = 0
+    CREATED = 1
+    AMENDED = 2
+
+
 class MetricSetType(messages.Enum):
     """Type determining the schema for a metric set."""
 
@@ -317,6 +361,7 @@ METRIC_SET_KEYS = {
         ]
     )
 }
+
 
 # These race values are derived from one or more answers to the race/ethnicity question
 # in questionnaire responses.
@@ -530,7 +575,7 @@ class MetricsAPIVersion(messages.Enum):
 
 
 # The lower bounds of the age buckets.
-_AGE_LB = [0, 18, 26, 36, 46, 56, 66, 76, 86]
+_AGE_LB = [0, 18, 25, 35, 45, 55, 65, 75, 85]
 AGE_BUCKETS = ["{}-{}".format(b, e) for b, e in zip(_AGE_LB, [a - 1 for a in _AGE_LB[1:]] + [""])]
 
 
@@ -552,6 +597,10 @@ def _map_single_race(code):
     return ANSWER_CODE_TO_RACE.get(code.parent)
 
 
+def get_all_races_from_codes(race_codes):
+    return set([_map_single_race(race_code) for race_code in race_codes])
+
+
 def get_race(race_codes):
     """Transforms one or more race codes from questionnaire response answers about race
   into a single race enum; the enum includes values for multiple races.
@@ -561,7 +610,7 @@ def get_race(race_codes):
     if len(race_codes) == 1:
         return _map_single_race(race_codes[0])
     else:
-        all_races = set([_map_single_race(race_code) for race_code in race_codes])
+        all_races = get_all_races_from_codes(race_codes)
         if Race.HISPANIC_LATINO_OR_SPANISH in all_races:
             if len(all_races) > 2:
                 return Race.HLS_AND_MORE_THAN_ONE_OTHER_RACE
@@ -878,7 +927,7 @@ class WorkbenchResearcherEthnicCategory(messages.Enum):
     BLACK_SOMALI = 32
     BLACK_SOUTH_AFRICAN = 33
     BLACK_OTHER = 34
-    HISPANIC_COLUMBIAN = 35
+    HISPANIC_COLOMBIAN = 35
     HISPANIC_CUBAN = 36
     HISPANIC_DOMINICAN = 37
     HISPANIC_ECUADORIAN = 38
@@ -921,6 +970,10 @@ class WorkbenchResearcherEthnicCategory(messages.Enum):
     WHITE_SCOTTISH = 75
     WHITE_SPANISH = 76
     WHITE_OTHER = 77
+    AI_AN_AMERICAN_INDIAN = 78
+    AI_AN_ALASKA_NATIVE = 79
+    BLACK_SOUTH_AFRICAN = 80
+    MENA_LEBANESE = 81
 
 
 class WorkbenchResearcherGenderIdentity(messages.Enum):

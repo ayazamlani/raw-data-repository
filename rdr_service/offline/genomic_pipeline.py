@@ -4,8 +4,8 @@ from rdr_service import clock, config
 from rdr_service.dao.genomics_dao import GenomicAW1RawDao, GenomicAW2RawDao, GenomicAW3RawDao, \
     GenomicAW4RawDao, GenomicJobRunDao, GenomicW2SCRawDao, GenomicW3SRRawDao, GenomicW4WRRawDao, GenomicW3SCRawDao, \
     GenomicW3NSRawDao, GenomicW5NFRawDao, GenomicW3SSRawDao, GenomicW2WRawDao, GenomicW1ILRawDao
-from rdr_service.genomic.genomic_cvl_reconciliation import GenomicCVLReconcile
 from rdr_service.genomic.genomic_job_controller import GenomicJobController
+from rdr_service.genomic.genomic_storage_class import GenomicStorageClass
 from rdr_service.genomic_enums import GenomicJob, GenomicSubProcessResult, GenomicManifestTypes
 from rdr_service.services.system_utils import JSONObject
 
@@ -91,32 +91,6 @@ def ingest_genomic_centers_metrics_files(provider=None):
         controller.ingest_gc_metrics()
 
 
-def reconcile_metrics_vs_array_data(provider=None):
-    """
-    Entrypoint for GC Metrics File reconciliation
-    Array Files vs Listed in Manifest.
-    """
-    with GenomicJobController(GenomicJob.RECONCILE_ARRAY_DATA,
-                              storage_provider=provider,
-                              bucket_name_list=config.GENOMIC_CENTER_DATA_BUCKET_NAME) as controller:
-        controller.run_reconciliation_to_data(
-            genome_type=config.GENOME_TYPE_ARRAY,
-        )
-
-
-def reconcile_metrics_vs_wgs_data(provider=None):
-    """
-    Entrypoint for GC Metrics File reconciliation
-    WGS Files vs Listed in Manifest.
-    """
-    with GenomicJobController(GenomicJob.RECONCILE_WGS_DATA,
-                              storage_provider=provider,
-                              bucket_name_list=config.GENOMIC_CENTER_DATA_BUCKET_NAME) as controller:
-        controller.run_reconciliation_to_data(
-            genome_type=config.GENOME_TYPE_WGS
-        )
-
-
 def aw3_array_manifest_workflow():
     """
     Entrypoint for AW3 Array Workflow
@@ -126,7 +100,7 @@ def aw3_array_manifest_workflow():
                               max_num=config.getSetting(config.GENOMIC_MAX_NUM_GENERATE, default=4000)) as controller:
         controller.generate_manifest(
             GenomicManifestTypes.AW3_ARRAY,
-            _genome_type=config.GENOME_TYPE_ARRAY,
+            genome_type=config.GENOME_TYPE_ARRAY,
         )
 
         for manifest in controller.manifests_generated:
@@ -137,7 +111,7 @@ def aw3_array_manifest_workflow():
             load_awn_manifest_into_raw_table(manifest['file_path'], "aw3")
 
 
-def aw3_wgs_manifest_workflow():
+def aw3_wgs_manifest_workflow(**kwargs):
     """
     Entrypoint for AW3 WGS Workflow
     """
@@ -146,7 +120,8 @@ def aw3_wgs_manifest_workflow():
                               max_num=config.getSetting(config.GENOMIC_MAX_NUM_GENERATE, default=4000)) as controller:
         controller.generate_manifest(
             GenomicManifestTypes.AW3_WGS,
-            _genome_type=config.GENOME_TYPE_WGS,
+            genome_type=config.GENOME_TYPE_WGS,
+            pipeline_id=kwargs.get('pipeline_id')
         )
 
         for manifest in controller.manifests_generated:
@@ -155,85 +130,6 @@ def aw3_wgs_manifest_workflow():
 
             # Call pipeline function to load raw
             load_awn_manifest_into_raw_table(manifest['file_path'], "aw3")
-
-
-def cvl_w1il_manifest_workflow(cvl_site_bucket_map, module_type):
-    for site_id in config.GENOMIC_CVL_SITES:
-        cvl_bucket_name_key = cvl_site_bucket_map[site_id]
-        manifest_type = {
-            'pgx': GenomicManifestTypes.CVL_W1IL_PGX,
-            'hdr': GenomicManifestTypes.CVL_W1IL_HDR
-        }[module_type]
-
-        with GenomicJobController(
-            GenomicJob.CVL_W1IL_WORKFLOW,
-            bucket_name=cvl_bucket_name_key,
-            cvl_site_id=site_id
-        ) as controller:
-            controller.generate_manifest(
-                manifest_type=manifest_type,
-                _genome_type=config.GENOME_TYPE_WGS
-            )
-            for manifest in controller.manifests_generated:
-                logging.info(
-                    f"Loading W1IL Manifest Raw Data: {manifest['file_path']}")
-
-                # Call pipeline function to load raw
-                load_awn_manifest_into_raw_table(
-                    manifest['file_path'],
-                    "w1il",
-                    cvl_site_id=site_id
-                )
-
-
-def cvl_w2w_manifest_workflow(cvl_site_bucket_map):
-    for site_id in config.GENOMIC_CVL_SITES:
-        cvl_bucket_name_key = cvl_site_bucket_map[site_id]
-        with GenomicJobController(
-            GenomicJob.CVL_W2W_WORKFLOW,
-            bucket_name=cvl_bucket_name_key,
-            cvl_site_id=site_id
-        ) as controller:
-            controller.generate_manifest(
-                manifest_type=GenomicManifestTypes.CVL_W2W,
-                _genome_type=config.GENOME_TYPE_WGS
-            )
-            for manifest in controller.manifests_generated:
-                logging.info(
-                    f"Loading W2W Manifest Raw Data: {manifest['file_path']}")
-
-                # Call pipeline function to load raw
-                load_awn_manifest_into_raw_table(
-                    manifest['file_path'],
-                    "w2w",
-                    cvl_site_id=site_id
-                )
-
-
-def cvl_w3sr_manifest_workflow():
-    """
-    Entrypoint for CVL W3SR Workflow
-    """
-    for site_id in config.GENOMIC_CVL_SITES:
-        with GenomicJobController(
-            GenomicJob.CVL_W3SR_WORKFLOW,
-            bucket_name=config.BIOBANK_SAMPLES_BUCKET_NAME,
-            cvl_site_id=site_id
-        ) as controller:
-            controller.generate_manifest(
-                manifest_type=GenomicManifestTypes.CVL_W3SR,
-                _genome_type=config.GENOME_TYPE_WGS,
-            )
-            for manifest in controller.manifests_generated:
-                logging.info(
-                    f"Loading W3SR Manifest Raw Data: {manifest['file_path']}")
-
-                # Call pipeline function to load raw
-                load_awn_manifest_into_raw_table(
-                    manifest['file_path'],
-                    "w3sr",
-                    cvl_site_id=site_id
-                )
 
 
 def aw3_array_investigation_workflow():
@@ -245,7 +141,7 @@ def aw3_array_investigation_workflow():
                               max_num=config.getSetting(config.GENOMIC_MAX_NUM_GENERATE, default=4000)) as controller:
         controller.generate_manifest(
             GenomicManifestTypes.AW3_ARRAY,
-            _genome_type="aou_array_investigation",
+            genome_type="aou_array_investigation",
         )
 
         for manifest in controller.manifests_generated:
@@ -256,7 +152,7 @@ def aw3_array_investigation_workflow():
             load_awn_manifest_into_raw_table(manifest['file_path'], "aw3")
 
 
-def aw3_wgs_investigation_workflow():
+def aw3_wgs_investigation_workflow(**kwargs):
     """
     Entrypoint for AW3 WGS Workflow
     """
@@ -265,7 +161,8 @@ def aw3_wgs_investigation_workflow():
                               max_num=config.getSetting(config.GENOMIC_MAX_NUM_GENERATE, default=4000)) as controller:
         controller.generate_manifest(
             GenomicManifestTypes.AW3_WGS,
-            _genome_type="aou_wgs_investigation",
+            genome_type="aou_wgs_investigation",
+            pipeline_id=kwargs.get('pipeline_id')
         )
 
         for manifest in controller.manifests_generated:
@@ -283,8 +180,11 @@ def gem_a1_manifest_workflow():
     """
     with GenomicJobController(GenomicJob.GEM_A1_MANIFEST,
                               bucket_name=config.GENOMIC_GEM_BUCKET_NAME) as controller:
-        controller.reconcile_report_states(_genome_type=config.GENOME_TYPE_ARRAY)
-        controller.generate_manifest(GenomicManifestTypes.GEM_A1, _genome_type=config.GENOME_TYPE_ARRAY)
+        controller.reconcile_report_states(genome_type=config.GENOME_TYPE_ARRAY)
+        controller.generate_manifest(
+            GenomicManifestTypes.GEM_A1,
+            genome_type=config.GENOME_TYPE_ARRAY
+        )
 
 
 def gem_a2_manifest_workflow():
@@ -294,7 +194,7 @@ def gem_a2_manifest_workflow():
     with GenomicJobController(GenomicJob.GEM_A2_MANIFEST,
                               bucket_name=config.GENOMIC_GEM_BUCKET_NAME,
                               sub_folder_name=config.GENOMIC_GEM_A2_MANIFEST_SUBFOLDER) as controller:
-        controller.reconcile_report_states(_genome_type=config.GENOME_TYPE_ARRAY)
+        controller.reconcile_report_states(genome_type=config.GENOME_TYPE_ARRAY)
         controller.run_general_ingestion_workflow()
 
 
@@ -304,8 +204,11 @@ def gem_a3_manifest_workflow():
     """
     with GenomicJobController(GenomicJob.GEM_A3_MANIFEST,
                               bucket_name=config.GENOMIC_GEM_BUCKET_NAME) as controller:
-        controller.reconcile_report_states(_genome_type=config.GENOME_TYPE_ARRAY)
-        controller.generate_manifest(GenomicManifestTypes.GEM_A3, _genome_type=config.GENOME_TYPE_ARRAY)
+        controller.reconcile_report_states(genome_type=config.GENOME_TYPE_ARRAY)
+        controller.generate_manifest(
+            GenomicManifestTypes.GEM_A3,
+            genome_type=config.GENOME_TYPE_ARRAY
+        )
 
 
 def gem_metrics_ingest():
@@ -324,15 +227,6 @@ def update_report_state_for_consent_removal():
     """
     with GenomicJobController(GenomicJob.UPDATE_REPORT_STATES_FOR_CONSENT_REMOVAL) as controller:
         controller.reconcile_report_states()
-
-
-def create_cvl_reconciliation_report():
-    """
-    Entrypoint for CVL reconciliation workflow
-    Sources from genomic_set_member and produces CVL reconciliation report CSV
-    """
-    with GenomicJobController(GenomicJob.CVL_RECONCILIATION_REPORT) as controller:
-        controller.run_cvl_reconciliation_report()
 
 
 def scan_and_complete_feedback_records():
@@ -367,11 +261,6 @@ def genomic_missing_files_clean_up(num_days=90):
         controller.gc_missing_files_record_clean_up(num_days)
 
 
-def genomic_missing_files_resolve():
-    with GenomicJobController(GenomicJob.RESOLVE_MISSING_FILES) as controller:
-        controller.resolve_missing_gc_files()
-
-
 def update_members_state_resolved_data_files():
     with GenomicJobController(GenomicJob.UPDATE_MEMBERS_STATE_RESOLVED_DATA_FILES) as controller:
         controller.update_member_aw2_missing_states_if_resolved()
@@ -385,16 +274,6 @@ def update_members_blocklists():
 def reconcile_informing_loop_responses():
     with GenomicJobController(GenomicJob.RECONCILE_INFORMING_LOOP_RESPONSES) as controller:
         controller.reconcile_informing_loop_responses()
-
-
-def reconcile_gc_data_file_to_table():
-    with GenomicJobController(GenomicJob.RECONCILE_GC_DATA_FILE_TO_TABLE) as controller:
-        controller.reconcile_gc_data_file_to_table()
-
-# Disabling job until further notice
-# def reconcile_raw_to_aw1_ingested():
-#     with GenomicJobController(GenomicJob.RECONCILE_RAW_AW1_INGESTED) as controller:
-#         controller.reconcile_raw_to_aw1_ingested()
 
 
 def reconcile_raw_to_aw2_ingested():
@@ -412,26 +291,33 @@ def retry_manifest_ingestions():
         controller.retry_manifest_ingestions()
 
 
-def calculate_informing_loop_ready_flags():
-    with GenomicJobController(GenomicJob.CALCULATE_INFORMING_LOOP_READY) as controller:
-        controller.calculate_informing_loop_ready_flags()
-
-
 def create_aw2f_manifest(feedback_record):
     with GenomicJobController(GenomicJob.AW2F_MANIFEST,
                               bucket_name=config.BIOBANK_SAMPLES_BUCKET_NAME,
                               ) as controller:
-        controller.generate_manifest(GenomicManifestTypes.AW2F,
-                                     _genome_type=None,
-                                     feedback_record=feedback_record)
-
-
-def reconcile_cvl_results(reconcile_job_type):
-    with GenomicJobController(reconcile_job_type) as controller:
-        cvl_reconciler = GenomicCVLReconcile(
-            reconcile_type=reconcile_job_type
+        controller.generate_manifest(
+            GenomicManifestTypes.AW2F,
+            genome_type=None,
+            feedback_record=feedback_record
         )
-        cvl_reconciler.run_reconcile()
+
+
+def results_pipeline_withdrawals():
+    with GenomicJobController(GenomicJob.RESULTS_PIPELINE_WITHDRAWALS) as controller:
+        controller.check_results_withdrawals()
+
+
+def gem_results_to_report_state():
+    with GenomicJobController(GenomicJob.GEM_RESULT_REPORTS) as controller:
+        controller.gem_results_to_report_state()
+
+
+def genomic_update_storage_class(storage_job_type):
+    with GenomicJobController(storage_job_type) as controller:
+        genomic_storage = GenomicStorageClass(
+            storage_job_type=storage_job_type
+        )
+        genomic_storage.run_storage_update()
         controller.job_result = GenomicSubProcessResult.SUCCESS
 
 
@@ -605,6 +491,7 @@ def load_awn_manifest_into_raw_table(
         )
 
 
-def notify_email_group_of_w1il_gror_resubmit_participants(since_datetime):
-    with GenomicJobController(GenomicJob.CHECK_FOR_W1IL_GROR_RESUBMIT) as controller:
-        controller.check_w1il_gror_resubmit(since_datetime=since_datetime)
+def notify_aw3_ready_missing_data_files():
+    with GenomicJobController(GenomicJob.AW3_MISSING_DATA_FILE_REPORT) as controller:
+        controller.check_aw3_ready_missing_files()
+

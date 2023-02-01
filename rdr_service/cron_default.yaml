@@ -19,6 +19,11 @@ cron:
   schedule: every day 02:00
   timezone: America/New_York
   target: offline
+- description: Remove any obfuscation data that is expired
+  url: /offline/DeleteExpiredObfuscation
+  schedule: every day 03:00
+  timezone: America/New_York
+  target: offline
 - description: Participant count metrics (Do not manually start)
   url: /offline/ParticipantCountsOverTime
   schedule: every day 03:30
@@ -89,16 +94,6 @@ cron:
   timezone: America/New_York
   schedule: every monday 05:30
   target: offline
-- description: Genomic Reconciliation Array Data Workflow
-  url: /offline/GenomicArrayReconciliationWorkflow
-  timezone: America/New_York
-  schedule: every day 05:30
-  target: offline
-- description: Genomic Reconciliation WGS Data Workflow
-  url: /offline/GenomicWGSReconciliationWorkflow
-  timezone: America/New_York
-  schedule: every day 05:45
-  target: offline
 - description: Genomic GEM A1 Workflow
   url: /offline/GenomicGemA1Workflow
   timezone: America/New_York
@@ -124,20 +119,25 @@ cron:
   timezone: America/New_York
   schedule: every day 06:45
   target: offline
-- description: Genomic AW3 WGS Workflow
+- description: Genomic AW3 WGS Workflow (dragen_3.4.12)
   url: /offline/GenomicAW3WGSWorkflow
   timezone: America/New_York
   schedule: every monday 05:45
   target: offline
+- description: Genomic AW3 WGS Workflow (dragen_3.7.8)
+  url: /offline/GenomicAW3WGSUpdatedWorkflow
+  timezone: America/New_York
+  schedule: every monday 06:00
+  target: offline
 - description: Genomic CVL W1IL PGX Workflow
   url: /offline/GenomicCVLW1ILPgxWorkflow
   timezone: America/New_York
-  schedule: every wednesday 05:00
+  schedule: every tuesday 02:15
   target: offline
 - description: Genomic CVL W1IL HDR Workflow
   url: /offline/GenomicCVLW1ILHdrWorkflow
   timezone: America/New_York
-  schedule: every wednesday 05:15
+  schedule: every tuesday 02:00
   target: offline
 - description: Genomic CVL W2W Workflow (bi-weekly runs)
   url: /offline/GenomicCVLW2WWorkflow
@@ -169,16 +169,6 @@ cron:
   timezone: America/New_York
   schedule: every saturday 22:00
   target: offline
-- description: Genomic Missing Files Resolve
-  url: /offline/GenomicMissingFilesResolve
-  timezone: America/New_York
-  schedule: every 6 hours
-  target: offline
-- description: Reconcile GC Data File to Table
-  url: /offline/ReconcileGCDataFileToTable
-  timezone: America/New_York
-  schedule: every tuesday 02:00
-  target: offline
 - description: Reconcile Raw AW2 to Validation Metrics
   url: /offline/ReconcileRawToAw2Ingested
   timezone: America/New_York
@@ -204,6 +194,16 @@ cron:
   timezone: America/New_York
   schedule: every day 04:00
   target: offline
+- description: Genomic Reconcile Message Broker Results Ready
+  url: /offline/GenomicReconcileMessageBrokerResultsReady
+  timezone: America/New_York
+  schedule: every day 05:00
+  target: offline
+- description: Genomic Reconcile Message Broker Results Viewed
+  url: /offline/GenomicReconcileMessageBrokerResultsViewed
+  timezone: America/New_York
+  schedule: every day 05:00
+  target: offline
 - description: Genomic Retry Manifest Ingestion Failures
   url: /offline/GenomicRetryManifestIngestions
   timezone: America/New_York
@@ -212,7 +212,7 @@ cron:
 - description: Genomic Calculate Informing Loop Ready Status (Weekly)
   url: /offline/CalculateInformingLoopReadyStatusWeekly
   timezone: America/New_York
-  schedule: every monday 10:00
+  schedule: every tuesday 10:00
   target: offline
 - description: Genomic Calculate Informing Loop Ready Status (Daily)
   url: /offline/CalculateInformingLoopReadyStatusDaily
@@ -229,13 +229,39 @@ cron:
   timezone: America/New_York
   schedule: every day 07:15
   target: offline
+- description: Genomic CVL Resolve Samples (Daily)
+  url: /offline/GenomicCVLResolveSamples
+  timezone: America/New_York
+  schedule: every day 07:30
+  target: offline
 - description: Genomic CVL Reconciliation Alerts (Weekly)
   url: /offline/GenomicCVLReconciliationAlerts
   timezone: America/New_York
   schedule: every monday 09:00
   target: offline
-- description: Genomic GHR3 Resolve Samples (Weekly)
-  url: /offline/GenomicGHR3ResolveSamples
+- description: Genomic Results Pipeline Withdrawals
+  url: /offline/GenomicResultsPipelineWithdrawals
   timezone: America/New_York
-  schedule: every monday 10:00
+  schedule: every monday 11:00
   target: offline
+- description: Genomic Gem Result to Reports
+  url: /offline/GenomicGemResultReports
+  timezone: America/New_York
+  schedule: every day 06:00
+  target: offline
+- description: Genomic Reconcile Appointment Events
+  url: /offline/GenomicReconcileAppointmentEvents
+  timezone: America/New_York
+  schedule: every day 05:00
+  target: offline
+- description: Genomic Report for AW3 Ready Samples Missing Data Files (Weekly)
+  url: /offline/GenomicAW3ReadyMissingDataFilesReport
+  timezone: America/New_York
+  schedule: every monday 08:30
+  target: offline
+- description: Genomic GCR Outreach Escalation Notification (Daily)
+  url: /offline/GenomicNotifyGCROutreachEscalation
+  timezone: America/New_York
+  schedule: every day 04:30
+  target: offline
+

@@ -6,7 +6,7 @@ from rdr_service.dao.genomics_dao import GenomicSetMemberDao, GenomicGCValidatio
 from rdr_service.genomic_enums import GenomicJob, GenomicWorkflowState, GenomicContaminationCategory
 from rdr_service.tools.tool_libs.backfill_gvcf_paths import GVcfBackfillTool
 from rdr_service.tools.tool_libs.genomic_utils import GenomicProcessRunner, LoadRawManifest, IngestionClass, \
-    UnblockSamples
+    UnblockSamples, UpdateMissingFiles
 from tests.helpers.tool_test_mixin import ToolTestMixin
 from tests.helpers.unittest_base import BaseTestCase
 
@@ -220,7 +220,6 @@ class GenomicUtilsGeneralTest(GenomicUtilsTestBase):
         metric_dao = GenomicGCValidationMetricsDao()
         metric_obj = metric_dao.get(1)
 
-        self.assertEqual(metric_obj.gvcfReceived, 1)
         self.assertEqual(metric_obj.gvcfPath, expected_path)
 
     def test_unblock_samples(self):
@@ -258,7 +257,9 @@ class GenomicUtilsGeneralTest(GenomicUtilsTestBase):
             genomeType="aou_array",
             genomicWorkflowState=GenomicWorkflowState.AW1,
             blockResearch=True,
-            blockResults=True
+            blockResults=True,
+            blockResearchReason="test reason1",
+            blockResultsReason="test reason2"
         )
 
         self.data_generator.create_database_genomic_set_member(
@@ -269,6 +270,29 @@ class GenomicUtilsGeneralTest(GenomicUtilsTestBase):
             genomicWorkflowState=GenomicWorkflowState.AW1,
             blockResearch=True,
             blockResults=True
+        )
+
+        self.data_generator.create_database_genomic_set_member(
+            genomicSetId=gen_set.id,
+            biobankId="16",
+            sampleId="1016",
+            genomeType="aou_array",
+            genomicWorkflowState=GenomicWorkflowState.AW1,
+            blockResearch=True,
+            blockResults=True
+        )
+
+        # Sample that was replated
+        self.data_generator.create_database_genomic_set_member(
+            genomicSetId=gen_set.id,
+            biobankId="14",
+            sampleId="1012",
+            genomeType="aou_array",
+            genomicWorkflowState=GenomicWorkflowState.EXTRACT_REQUESTED,
+            blockResearch=True,
+            blockResults=True,
+            blockResearchReason="test reason1",
+            blockResultsReason="test reason2"
         )
 
         test_aw1 = "test-bucket/test_folder/testunblock_GEN_sample_manifest.csv"
@@ -314,6 +338,26 @@ class GenomicUtilsGeneralTest(GenomicUtilsTestBase):
             test_name="aou_array",
         )
 
+        self.data_generator.create_database_genomic_aw1_raw(
+            file_path=test_aw1,
+            package_id="pkg-1",
+            well_position="A16",
+            sample_id="1016",
+            collection_tube_id="211016",
+            biobank_id="A16",
+            test_name="aou_array",
+        )
+
+        self.data_generator.create_database_genomic_aw1_raw(
+            file_path=test_aw1,
+            package_id="pkg-1",
+            well_position="A14",
+            sample_id="1012",
+            collection_tube_id="211012",
+            biobank_id="A14",
+            test_name="aou_array",
+        )
+
         self.data_generator.create_database_genomic_aw2_raw(
             file_path=test_aw2,
             biobank_id="A14",
@@ -327,34 +371,56 @@ class GenomicUtilsGeneralTest(GenomicUtilsTestBase):
         test_sampleid_file = test_data.data_path("unblock_sampleids.txt")
         test_sampleid_file_2 = test_data.data_path("unblock_sampleids_2.txt")
         test_biobankid_file = test_data.data_path("unblock_biobankids.txt")
+        test_no_ingestion_file = test_data.data_path("unblock_sampleids_no_ingestion.txt")
+
         GenomicUtilsGeneralTest.run_tool(UnblockSamples, tool_args={
             "command": "unblock-samples",
             "file_path": test_sampleid_file,
-            "research_only": False,
-            "results_only": False,
+            "research": True,
+            "results": True,
+            "reingest": True,
             "dryrun": False
         })
 
         GenomicUtilsGeneralTest.run_tool(UnblockSamples, tool_args={
             "command": "unblock-samples",
             "file_path": test_sampleid_file_2,
-            "research_only": True,
-            "results_only": False,
+            "research": True,
+            "results": False,
+            "reingest": True,
             "dryrun": False
         })
 
         GenomicUtilsGeneralTest.run_tool(UnblockSamples, tool_args={
             "command": "unblock-samples",
             "file_path": test_biobankid_file,
-            "research_only": False,
-            "results_only": False,
+            "research": True,
+            "results": True,
+            "reingest": True,
             "dryrun": False
         })
+
+        GenomicUtilsGeneralTest.run_tool(UnblockSamples, tool_args={
+            "command": "unblock-samples",
+            "file_path": test_no_ingestion_file,
+            "research": False,
+            "results": True,
+            "reingest": False,
+            "dryrun": False
+        })
+
         member_dao = GenomicSetMemberDao()
+        member_dao.exclude_states.append(GenomicWorkflowState.EXTRACT_REQUESTED)
         sid_member = member_dao.get_member_from_sample_id("1012", "aou_array")
         self.assertEqual(sid_member.blockResults, 0)
         self.assertEqual(sid_member.blockResearch, 0)
         self.assertIsNot(sid_member.aw2FileProcessedId, None)
+        self.assertEqual(sid_member.blockResultsReason, "Formerly blocked due to 'test reason2'")
+        self.assertEqual(sid_member.blockResearchReason, "Formerly blocked due to 'test reason1'")
+
+        replate_member = member_dao.get(6)
+        self.assertIsNone(replate_member.aw1FileProcessedId)
+        self.assertIsNone(replate_member.aw2FileProcessedId)
 
         sid_member2 = member_dao.get_member_from_sample_id("1013", "aou_array")
         self.assertEqual(sid_member2.blockResults, 1)
@@ -364,3 +430,129 @@ class GenomicUtilsGeneralTest(GenomicUtilsTestBase):
         self.assertEqual(bid_member.blockResults, 0)
         self.assertEqual(bid_member.blockResearch, 0)
         self.assertEqual(bid_member.sampleId, "1011")
+
+        # Test Not Ingested
+        sid_member16 = member_dao.get_member_from_sample_id("1016", "aou_array")
+        self.assertEqual(sid_member16.blockResults, 0)
+        self.assertEqual(sid_member16.blockResearch, 1)
+        self.assertEqual(sid_member16.gcManifestWellPosition, None)
+
+    @mock.patch('os.path.exists')
+    @mock.patch('builtins.open', mock.mock_open(read_data="211147"))
+    def test_update_missing_files(self, mock_exists):
+        gen_set = self.data_generator.create_database_genomic_set(
+            genomicSetName=".",
+            genomicSetCriteria=".",
+            genomicSetVersion=1
+        )
+
+        array_member = self.data_generator.create_database_genomic_set_member(
+            genomicSetId=gen_set.id,
+            biobankId="3112",
+            sampleId="211145",
+            genomeType="aou_array",
+            genomicWorkflowState=GenomicWorkflowState.GC_DATA_FILES_MISSING
+        )
+
+        wgs_member = self.data_generator.create_database_genomic_set_member(
+            genomicSetId=gen_set.id,
+            biobankId="3113",
+            sampleId="211146",
+            genomeType="aou_wgs",
+            genomicWorkflowState=GenomicWorkflowState.GC_DATA_FILES_MISSING
+        )
+
+        filepath_wgs_member = self.data_generator.create_database_genomic_set_member(
+            genomicSetId=gen_set.id,
+            biobankId="3114",
+            sampleId="211147",
+            genomeType="aou_wgs",
+            genomicWorkflowState=GenomicWorkflowState.CVL_READY
+        )
+        mock_exists.return_value = True
+
+        self.data_generator.create_database_genomic_gc_validation_metrics(
+            genomicSetMemberId=array_member.id,
+            chipwellbarcode='10001_R01C01',
+
+        )
+        self.data_generator.create_database_genomic_gc_validation_metrics(
+            genomicSetMemberId=wgs_member.id,
+
+        )
+        self.data_generator.create_database_genomic_gc_validation_metrics(
+            genomicSetMemberId=filepath_wgs_member.id,
+            cramPath='test-bucket/Wgs_sample_raw_data/test.cram'
+        )
+        array_files = [
+            'test_data_folder/10001_R01C01.vcf.gz',
+            'test_data_folder/10001_R01C01.vcf.gz.tbi',
+            'test_data_folder/10001_R01C01.vcf.gz.md5sum',
+            'test_data_folder/10001_R01C01_Red.idat',
+            'test_data_folder/10001_R01C01_Grn.idat',
+            'test_data_folder/10001_R01C01_Red.idat.md5sum',
+            'test_data_folder/10001_R01C01_Grn.idat.md5sum',
+        ]
+        wgs_files = [
+            'Wgs_sample_raw_data/test.cram',
+            'Wgs_sample_raw_data/test.cram.crai',
+            'Wgs_sample_raw_data/test.cram.md5sum',
+            'Wgs_sample_raw_data/test.hard-filtered.vcf.gz',
+            'Wgs_sample_raw_data/test.hard-filtered.vcf.gz.md5sum',
+            'Wgs_sample_raw_data/test.hard-filtered.vcf.gz.tbi',
+            'Wgs_sample_raw_data/test.hard-filtered.gvcf.gz',
+            'Wgs_sample_raw_data/test.hard-filtered.gvcf.gz.md5sum'
+        ]
+        bucket_name = 'test-bucket'
+        for file_name in array_files:
+            # Set file type
+            file_type = file_name.split('/')[-1].split("_")[-1] if "idat" in file_name.lower() else \
+                '.'.join(file_name.split('.')[1:])
+
+            test_file_dict = {
+                'file_path': f'{bucket_name}/{file_name}',
+                'gc_site_id': 'rdr',
+                'bucket_name': bucket_name,
+                'file_prefix': 'test_data_folder',
+                'file_name': file_name,
+                'file_type': file_type,
+                'identifier_type': 'chipwellbarcode',
+                'identifier_value': "_".join(file_name.split('/')[1].split('_')[0:2]).split('.')[0],
+            }
+            self.data_generator.create_database_gc_data_file_record(**test_file_dict)
+
+        for file_name in wgs_files:
+            test_file_dict = {
+                'file_path': f'{bucket_name}/{file_name}',
+                'gc_site_id': 'rdr',
+                'bucket_name': bucket_name,
+                'file_prefix': 'Wgs_sample_raw_data',
+                'file_name': file_name,
+                'file_type': '.'.join(file_name.split('.')[1:]),
+                'identifier_type': 'sample_id',
+                'identifier_value': '211146',
+            }
+            self.data_generator.create_database_gc_data_file_record(**test_file_dict)
+
+        GenomicUtilsGeneralTest.run_tool(UpdateMissingFiles, tool_args={
+            "command": "update-missing-files",
+            "file_path": None,
+            "dryrun": False,
+            "update_filepath_scheme": False
+        })
+
+        metrics_dao = GenomicGCValidationMetricsDao()
+        array_metrics = metrics_dao.get_metrics_by_member_id(array_member.id)
+        self.assertEqual("gs://test-bucket/test_data_folder/10001_R01C01_Red.idat", array_metrics.idatRedPath)
+        wgs_metrics = metrics_dao.get_metrics_by_member_id(wgs_member.id)
+        self.assertEqual('gs://test-bucket/Wgs_sample_raw_data/test.cram', wgs_metrics.cramPath)
+
+        GenomicUtilsGeneralTest.run_tool(UpdateMissingFiles, tool_args={
+            "command": "update-missing-files",
+            "file_path": 'test.txt',
+            "dryrun": False,
+            "update_filepath_scheme": True
+        })
+
+        wgs_filepath_metrics = metrics_dao.get_metrics_by_member_id(filepath_wgs_member.id)
+        self.assertEqual('gs://test-bucket/Wgs_sample_raw_data/test.cram', wgs_filepath_metrics.cramPath)

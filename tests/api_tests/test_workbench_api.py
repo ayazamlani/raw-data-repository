@@ -258,7 +258,8 @@ class WorkbenchApiTest(BaseTestCase):
                         "NHPI_FIJIAN",
                         "MENA_MOROCCAN",
                         "HISPANIC_CUBAN",
-                        "WHITE_GERMAN"
+                        "WHITE_GERMAN",
+                        "HISPANIC_COLOMBIAN"
                     ],
                     "ethnicityAiAnOtherText": None,
                     "ethnicityAsianOtherText": "Tibetan",
@@ -275,8 +276,7 @@ class WorkbenchApiTest(BaseTestCase):
                     "orientationOtherText": None,
                     "sexAtBirth": "PREFER_NOT_TO_ANSWER",
                     "sexAtBirthOtherText": None,
-                    "yearOfBirth": 1970,
-                    "yearOfBirthPreferNot": None,
+                    "yearOfBirthPreferNot": True,
                     "disabilityHearing": "YES",
                     "disabilitySeeing": "NO",
                     "disabilityConcentrating": "PREFER_NOT_TO_ANSWER",
@@ -285,7 +285,8 @@ class WorkbenchApiTest(BaseTestCase):
                     "disabilityErrands": "PREFER_NOT_TO_ANSWER",
                     "disabilityOtherText": None,
                     "education": "DOCTORATE",
-                    "disadvantaged": "NO"
+                    "disadvantaged": "NO",
+                    "surveyComments": "a string"
                 }
 
             }
@@ -304,7 +305,7 @@ class WorkbenchApiTest(BaseTestCase):
         self.assertEqual(result.sexAtBirth, [1, 3])
         self.assertEqual(result.ethnicity, WorkbenchResearcherEthnicity('HISPANIC'))
         self.assertEqual(result.dsv2CompletionTime, datetime.datetime(2022, 5, 20, 14, 32, 56))
-        self.assertEqual(result.dsv2EthnicCategories, [15, 12, 4, 20, 58, 52, 36, 70])
+        self.assertEqual(result.dsv2EthnicCategories, [15, 12, 4, 20, 58, 52, 36, 70, 35])
         self.assertEqual(result.dsv2GenderIdentities, [2, 5])
         self.assertEqual(result.dsv2SexualOrientations, [3, 2])
         self.assertEqual(result.dsv2DisabilityHearing, WorkbenchResearcherYesNoPreferNot('YES'))
@@ -312,6 +313,8 @@ class WorkbenchApiTest(BaseTestCase):
         self.assertEqual(result.dsv2DisabilityConcentrating, WorkbenchResearcherYesNoPreferNot('PREFER_NOT_TO_ANSWER'))
         self.assertEqual(result.dsv2SexAtBirth, WorkbenchResearcherSexAtBirthV2('PREFER_NOT_TO_ANSWER'))
         self.assertEqual(result.dsv2Education, WorkbenchResearcherEducationV2('DOCTORATE'))
+        self.assertEqual(result.dsv2SurveyComments, "a string")
+        self.assertEqual(result.dsv2YearOfBirth, None)
 
     def test_backfill_researchers(self):
         # test create new

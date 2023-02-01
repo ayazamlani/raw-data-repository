@@ -1,10 +1,10 @@
+import logging
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from io import StringIO
-import logging
 import pytz
-from typing import Collection, List
+from typing import Collection, List, Optional
 
 from dateutil.parser import parse
 from sqlalchemy.orm import Session
@@ -43,6 +43,10 @@ class ValidationOutputStrategy(ABC):
     def process_results(self):
         ...
 
+    @abstractmethod
+    def set_reconsented_file_as_ready(self, file: ParsingResult):
+        ...
+
     @classmethod
     def _build_consent_list_structure(cls):
         def participant_results():
@@ -57,12 +61,14 @@ class StoreResultStrategy(ValidationOutputStrategy):
         self._consent_dao = consent_dao
         self._max_batch_count = 500
         self.project_id = project_id
+        self._reconsented_files = []
 
     def add_result(self, result: ParsingResult):
         self._results.append(result)
         if len(self._results) > self._max_batch_count:
             self.process_results()
             self._results = []
+            self._reconsented_files = []
 
     def _get_existing_results_for_participants(self):
         return self._consent_dao.get_validation_results_for_participants(
@@ -83,7 +89,13 @@ class StoreResultStrategy(ValidationOutputStrategy):
         self._consent_dao.batch_update_consent_files(new_results_to_store, self._session)
         self._session.commit()
         if new_results_to_store:
-            dispatch_rebuild_consent_metrics_tasks([r.id for r in new_results_to_store], project_id=self.project_id)
+            updated_ids = [result.id for result in new_results_to_store]
+            updated_ids.extend([file.id for file in self._reconsented_files])
+            dispatch_rebuild_consent_metrics_tasks(updated_ids, project_id=self.project_id)
+
+    def set_reconsented_file_as_ready(self, file: ParsingResult):
+        file.sync_status = ConsentSyncStatus.READY_FOR_SYNC
+        self._reconsented_files.append(file)
 
 
 class ReplacementStoringStrategy(ValidationOutputStrategy):
@@ -94,6 +106,7 @@ class ReplacementStoringStrategy(ValidationOutputStrategy):
         self.results = self._build_consent_list_structure()
         self._max_batch_count = 500
         self.project_id = project_id
+        self._reconsented_files = []
 
     def add_result(self, result: ParsingResult):
         self.results[result.participant_id][result.type].append(result)
@@ -103,6 +116,7 @@ class ReplacementStoringStrategy(ValidationOutputStrategy):
             self.process_results()
             self.results = self._build_consent_list_structure()
             self.participant_ids = set()
+            self._reconsented_files = []
 
     def _build_previous_result_map(self):
         results = self._build_consent_list_structure()
@@ -141,7 +155,13 @@ class ReplacementStoringStrategy(ValidationOutputStrategy):
         self.consent_dao.batch_update_consent_files(results_to_update, self.session)
         self.session.commit()
         if results_to_update:
-            dispatch_rebuild_consent_metrics_tasks([r.id for r in results_to_update], project_id=self.project_id)
+            updated_ids = [result.id for result in results_to_update]
+            updated_ids.extend([file.id for file in self._reconsented_files])
+            dispatch_rebuild_consent_metrics_tasks(updated_ids, project_id=self.project_id)
+
+    def set_reconsented_file_as_ready(self, file: ParsingResult):
+        file.sync_status = ConsentSyncStatus.READY_FOR_SYNC
+        self._reconsented_files.append(file)
 
     @classmethod
     def _find_file_ready_for_sync(cls, results: List[ParsingResult]):
@@ -232,6 +252,10 @@ class LogResultStrategy(ValidationOutputStrategy):
                     report_lines.append(self._line_output_for_validation(result, verbose=self.verbose))
 
         self.logger.info('\n'.join(report_lines))
+
+    def set_reconsented_file_as_ready(self, file: ParsingResult):
+        # Not modifying files since this class is just meant to write logs about the files
+        ...
 
     def _line_output_for_validation(self, file: ParsingResult, verbose: bool):
         output_line = StringIO()
@@ -349,17 +373,22 @@ class ConsentValidationController:
                     storage_strategy.add_all(validator.get_gror_validation_results())
                 elif consent_type == ConsentType.PRIMARY_UPDATE:
                     storage_strategy.add_all(validator.get_primary_update_validation_results())
+                elif consent_type == ConsentType.ETM:
+                    storage_strategy.add_all(validator.get_etm_validation_results())
 
     def validate_consent_responses(self, summary: ParticipantSummary, output_strategy: ValidationOutputStrategy,
                                    consent_responses: Collection[ConsentResponse]):
         validator = self._build_validator(summary)
         validation_method_map = {
             ConsentType.PRIMARY: validator.get_primary_validation_results,
+            ConsentType.PRIMARY_RECONSENT: validator.get_primary_reconsent_validation_results,
             ConsentType.CABOR: validator.get_cabor_validation_results,
             ConsentType.EHR: validator.get_ehr_validation_results,
+            ConsentType.EHR_RECONSENT: validator.get_ehr_reconsent_validation_results,
             ConsentType.GROR: validator.get_gror_validation_results,
             ConsentType.PRIMARY_UPDATE: validator.get_primary_update_validation_results,
-            ConsentType.WEAR: validator.get_wear_validation_results
+            ConsentType.WEAR: validator.get_wear_validation_results,
+            ConsentType.ETM: validator.get_etm_validation_results
         }
 
         for consent_response in consent_responses:
@@ -370,6 +399,14 @@ class ConsentValidationController:
             for result in validation_results:
                 result.consent_response = consent_response
             output_strategy.add_all(validation_results)
+
+            if consent_response.type in [ConsentType.PRIMARY_RECONSENT, ConsentType.EHR_RECONSENT]:
+                original_consent = self._find_original_file_for_reconsent(
+                    reconsent_type=consent_response.type,
+                    participant_id=summary.participantId
+                )
+                if original_consent:
+                    output_strategy.set_reconsented_file_as_ready(original_consent)
 
     def validate_participant_consents(self, summary: ParticipantSummary, output_strategy: ValidationOutputStrategy,
                                       min_authored_date: date = None, max_authored_date: date = None,
@@ -410,9 +447,11 @@ class ConsentValidationController:
             max_authored=max_authored_date
         ):
             output_strategy.add_all(self._process_validation_results(validator.get_primary_update_validation_results()))
+        if self._check_consent_type(ConsentType.ETM, types_to_validate):
+            output_strategy.add_all(self._process_validation_results(validator.get_etm_validation_results()))
 
-    def validate_consent_uploads(self, output_strategy: ValidationOutputStrategy,
-                                 min_consent_date=None, max_consent_date=None):
+
+    def validate_consent_uploads(self, output_strategy: ValidationOutputStrategy):
         """
         Find all the expected consents (filtering by dates if provided) and check the files that have been uploaded
         """
@@ -431,13 +470,10 @@ class ConsentValidationController:
             self._process_id_consent_map(
                 participant_id_consent_map=participant_id_consent_map,
                 output_strategy=output_strategy,
-                session=self._session,
-                min_consent_date=min_consent_date,
-                max_consent_date=max_consent_date
+                session=self._session
             )
 
-    def _process_id_consent_map(self, participant_id_consent_map, output_strategy,
-                                session, min_consent_date=None, max_consent_date=None):
+    def _process_id_consent_map(self, participant_id_consent_map, output_strategy, session):
         participant_summaries = self.participant_summary_dao.get_by_ids_with_session(
             session=session,
             obj_ids=participant_id_consent_map.keys()
@@ -449,17 +485,6 @@ class ConsentValidationController:
                 consent_responses=participant_id_consent_map[summary.participantId]
             )
         output_strategy.process_results()
-
-        # Use the legacy query for the day that the updated check is released (and in case any are missed)
-        summaries_needing_validated = self.consent_dao.get_participants_with_unvalidated_files(session)
-        logging.info(f'{len(summaries_needing_validated)} participants still needed validation')
-        for summary in summaries_needing_validated:
-            self.validate_participant_consents(
-                summary=summary,
-                output_strategy=output_strategy,
-                min_authored_date=min_consent_date,
-                max_authored_date=max_consent_date
-            )
 
     def validate_all_for_participant(self, participant_id: int, output_strategy: ValidationOutputStrategy):
         summary: ParticipantSummary = self.participant_summary_dao.get(participant_id)
@@ -475,6 +500,8 @@ class ConsentValidationController:
             output_strategy.add_all(validator.get_gror_validation_results())
         if self._has_primary_update_consent(summary):
             output_strategy.add_all(validator.get_primary_update_validation_results())
+        if self._has_consent(consent_status=summary.consentForEtM):
+            output_strategy.add_all(validator.get_etm_validation_results())
 
     def revalidate_file(self, summary: ParticipantSummary, file: ParsingResult,
                         output_strategy: ValidationOutputStrategy):
@@ -563,6 +590,40 @@ class ConsentValidationController:
 
         return None
 
+    def _find_original_file_for_reconsent(
+        self, reconsent_type: ConsentType, participant_id: int
+    ) -> Optional[ParsingResult]:
+        original_file_type = {
+            ConsentType.PRIMARY_RECONSENT: ConsentType.PRIMARY,
+            ConsentType.EHR_RECONSENT: ConsentType.EHR
+        }.get(reconsent_type)
+
+        file_list = ConsentDao.get_files_for_participant(
+            participant_id=participant_id,
+            consent_type=original_file_type,
+            session=self._session
+        )
+        if any([
+            file.sync_status in [ConsentSyncStatus.READY_FOR_SYNC, ConsentSyncStatus.SYNC_COMPLETE]
+            for file in file_list
+        ]):
+            logging.warning(f"Valid original file found for P{participant_id}'s {reconsent_type}")
+            return None
+
+        for file in file_list:
+            # If the file is valid (other than the version), return the file
+            if (
+                file.is_signature_valid and file.is_signing_date_valid
+                and file.other_errors in [
+                    ConsentOtherErrors.NON_VETERAN_CONSENT_FOR_VETERAN,
+                    ConsentOtherErrors.VETERAN_CONSENT_FOR_NON_VETERAN
+                ]
+            ):
+                return file
+
+        logging.warning(f"Unable to find suitable original file for P{participant_id}'s {reconsent_type}")
+        return None
+
 
 class ConsentValidator:
     def __init__(self, consent_factory: files.ConsentFileAbstractFactory,
@@ -586,6 +647,16 @@ class ConsentValidator:
             expected_sign_datetime=expected_signing_date
         )
 
+    def get_primary_reconsent_validation_results(self, expected_signing_date: datetime = None) -> List[ParsingResult]:
+        if expected_signing_date is None:
+            expected_signing_date = self.participant_summary.consentForStudyEnrollmentFirstYesAuthored
+
+        return self._generate_validation_results(
+            consent_files=self.factory.get_primary_consents(),
+            consent_type=ConsentType.PRIMARY_RECONSENT,
+            expected_sign_datetime=expected_signing_date
+        )
+
     def get_ehr_validation_results(self, expected_signing_date: datetime = None) -> List[ParsingResult]:
         if expected_signing_date is None:
             expected_signing_date = self.participant_summary.consentForElectronicHealthRecordsAuthored
@@ -593,6 +664,16 @@ class ConsentValidator:
         return self._generate_validation_results(
             consent_files=self.factory.get_ehr_consents(),
             consent_type=ConsentType.EHR,
+            expected_sign_datetime=expected_signing_date
+        )
+
+    def get_ehr_reconsent_validation_results(self, expected_signing_date: datetime = None) -> List[ParsingResult]:
+        if expected_signing_date is None:
+            expected_signing_date = self.participant_summary.consentForElectronicHealthRecordsAuthored
+
+        return self._generate_validation_results(
+            consent_files=self.factory.get_ehr_consents(),
+            consent_type=ConsentType.EHR_RECONSENT,
             expected_sign_datetime=expected_signing_date
         )
 
@@ -635,6 +716,16 @@ class ConsentValidator:
             expected_sign_datetime=expected_signing_date
         )
 
+    def get_etm_validation_results(self, expected_signing_date: datetime = None) -> List[ParsingResult]:
+        if expected_signing_date is None:
+            expected_signing_date = self.participant_summary.consentForEtMAuthored
+
+        return self._generate_validation_results(
+            consent_files=self.factory.get_etm_consents(),
+            consent_type=ConsentType.ETM,
+            expected_sign_datetime=expected_signing_date
+        )
+
     def revalidate(self, file: ParsingResult) -> ParsingResult:
         expected_signature_datetime = datetime(
             year=file.expected_sign_date.year,
@@ -650,9 +741,9 @@ class ConsentValidator:
         )[0]
 
     def _get_extra_validation_function_by_type(self, consent_type: ConsentType):
-        if consent_type == ConsentType.PRIMARY:
+        if consent_type in [ConsentType.PRIMARY, ConsentType.PRIMARY_RECONSENT]:
             return self._validate_is_va_file
-        elif consent_type == ConsentType.EHR:
+        elif consent_type in [ConsentType.EHR, ConsentType.EHR_RECONSENT]:
             return self._additional_ehr_checks
         elif consent_type == ConsentType.GROR:
             return self._check_for_checkmark
@@ -693,11 +784,17 @@ class ConsentValidator:
         if result.expected_sign_date < sensitive_form_release_date or consent.get_is_va_consent():
             return  # Skip the following checks for sensitive release fields
 
-        state_of_care_answer_str = QuestionnaireResponseDao.get_latest_answer_for_state_receiving_care(
+        state_answer_str = QuestionnaireResponseDao.get_latest_answer_for_state_receiving_care(
             session=self._session,
             participant_id=self.participant_summary.participantId
         )
-        if state_of_care_answer_str in code_constants.SENSITIVE_EHR_STATES:
+        if state_answer_str is None:
+            # If we don't yet know the participant's state of care, use their state of residence instead
+            state_answer_str = QuestionnaireResponseDao.get_latest_answer_for_state_of_residence(
+                session=self._session,
+                participant_id=self.participant_summary.participantId
+            )
+        if state_answer_str in code_constants.SENSITIVE_EHR_STATES:
             if not consent.is_sensitive_form():
                 self._append_other_error(ConsentOtherErrors.SENSITIVE_EHR_EXPECTED, result)
                 result.sync_status = ConsentSyncStatus.NEEDS_CORRECTING

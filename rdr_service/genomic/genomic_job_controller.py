@@ -2,10 +2,12 @@
 This module tracks and validates the status of Genomics Pipeline Subprocesses.
 """
 import logging
-from datetime import datetime, timedelta
+import json
+from typing import List
 
 import pytz
-from sqlalchemy.orm.exc import MultipleResultsFound, NoResultFound
+
+from datetime import datetime, timedelta
 
 from rdr_service import clock, config
 from rdr_service.api_util import list_blobs
@@ -17,18 +19,20 @@ from rdr_service.config import (
     GENOME_TYPE_ARRAY,
     MissingConfigException,
     RDR_SLACK_WEBHOOKS,
-    GENOME_TYPE_WGS)
+    GENOME_TYPE_WGS, GENOMIC_MEMBER_BLOCKLISTS)
 from rdr_service.dao.message_broker_dao import MessageBrokenEventDataDao
 from rdr_service.genomic.genomic_data_quality_components import ReportingComponent
 from rdr_service.genomic.genomic_mappings import raw_aw1_to_genomic_set_member_fields, \
     raw_aw2_to_genomic_set_member_fields, genomic_data_file_mappings, genome_centers_id_from_bucket_array, \
-    wgs_file_types_attributes, array_file_types_attributes, informing_loop_event_mappings
+    wgs_file_types_attributes, array_file_types_attributes, informing_loop_event_mappings, \
+    cvl_result_reconciliation_modules, message_broker_report_ready_event_state_mappings
+from rdr_service.genomic.genomic_message_broker import GenomicMessageBroker
 from rdr_service.genomic.genomic_set_file_handler import DataError
 from rdr_service.genomic.genomic_state_handler import GenomicStateHandler
 from rdr_service.model.genomics import GenomicManifestFile, GenomicManifestFeedback, \
-    GenomicGCValidationMetrics, GenomicInformingLoop, GenomicGcDataFile, GenomicResultViewed
+    GenomicGCValidationMetrics, GenomicGcDataFile, GenomicGCROutreachEscalationNotified
 from rdr_service.genomic_enums import GenomicJob, GenomicWorkflowState, GenomicSubProcessStatus, \
-    GenomicSubProcessResult, GenomicIncidentCode, GenomicManifestTypes
+    GenomicSubProcessResult, GenomicIncidentCode, GenomicManifestTypes, GenomicReportState
 from rdr_service.genomic.genomic_job_components import (
     GenomicFileIngester,
     GenomicReconciler,
@@ -52,7 +56,9 @@ from rdr_service.dao.genomics_dao import (
     GenomicSetDao,
     UserEventMetricsDao,
     GenomicResultViewedDao,
-    GenomicQueriesDao
+    GenomicQueriesDao, GenomicMemberReportStateDao, GenomicAppointmentEventDao,
+    GenomicCVLResultPastDueDao, GenomicResultWithdrawalsDao, GenomicAppointmentEventMetricsDao,
+    GenomicAppointmentEventNotifiedDao, GenomicDefaultBaseDao
 )
 from rdr_service.services.email_service import Email, EmailService
 from rdr_service.services.slack_utils import SlackMessageHandler
@@ -93,7 +99,6 @@ class GenomicJobController:
         self.job_result = GenomicSubProcessResult.UNSET
         self.last_run_time = datetime(2019, 11, 5, 0, 0, 0)
         self.max_num = max_num
-        self.member_ids_for_update = []
         self.manifests_generated = []
         self.cvl_site_id = cvl_site_id
 
@@ -107,10 +112,14 @@ class GenomicJobController:
         self.metrics_dao = GenomicGCValidationMetricsDao()
         self.member_dao = GenomicSetMemberDao()
         self.informing_loop_dao = GenomicInformingLoopDao()
+        self.cvl_result_past_due_dao = GenomicCVLResultPastDueDao()
         self.result_viewed_dao = GenomicResultViewedDao()
+        self.report_state_dao = GenomicMemberReportStateDao()
+        self.appointment_dao = GenomicAppointmentEventDao()
         self.missing_files_dao = GenomicGcDataFileMissingDao()
         self.message_broker_event_dao = MessageBrokenEventDataDao()
         self.event_dao = UserEventMetricsDao()
+        self.query_dao = GenomicQueriesDao()
         self.ingester = None
         self.file_mover = None
         self.reconciler = None
@@ -288,6 +297,19 @@ class GenomicJobController:
         except RuntimeError:
             self.job_result = GenomicSubProcessResult.ERROR
 
+    def ingest_appointment_metrics_file(self, *, file_path):
+        try:
+            self.ingester = GenomicFileIngester(job_id=self.job_id,
+                                                job_run_id=self.job_run.id,
+                                                bucket=self.bucket_name,
+                                                target_file=file_path,
+                                                _controller=self)
+
+            self.job_result = self.ingester.ingest_appointment_metrics(file_path)
+
+        except RuntimeError:
+            self.job_result = GenomicSubProcessResult.ERROR
+
     def ingest_specific_manifest(self, filename):
         """
         Uses GenomicFileIngester to ingest specific Manifest file.
@@ -347,17 +369,14 @@ class GenomicJobController:
             else:
                 bid = member.biobankId
             # Get Raw AW1 Records for biobank IDs and genome_type
-            try:
-                raw_rec = raw_dao.get_raw_record_from_identifier_genome_type(
-                    identifier=bid if id_field == 'biobankId' else getattr(member, id_field),
-                    genome_type=member.genomeType
-                )
-            except MultipleResultsFound:
-                multiples.append(member.id)
-            except NoResultFound:
-                missing.append(member.id)
-            else:
+            raw_rec = raw_dao.get_raw_record_from_identifier_genome_type(
+                identifier=bid if id_field == 'biobankId' else getattr(member, id_field),
+                genome_type=member.genomeType
+            )
+            if raw_rec:
                 update_recs.append((member, raw_rec))
+            else:
+                missing.append(member.id)
 
         if update_recs:
             # Get unique file_paths
@@ -427,11 +446,84 @@ class GenomicJobController:
         except RuntimeError:
             logging.warning('Inserting data file failure')
 
-    def ingest_records_from_message_broker_data(self, *, message_record_id, event_type):
+    def gem_results_to_report_state(self):
+        gem_result_records = self.member_dao.get_gem_results_for_report_state()
 
-        def _set_module_type(records):
-            mod_type = [obj for obj in records if obj.fieldName in ['module_type', 'result_type'] and obj.valueString]
-            return mod_type[0].valueString if mod_type else None
+        if not gem_result_records:
+            self.job_result = GenomicSubProcessResult.NO_RESULTS
+            return
+
+        logging.info(f'Creating {len(gem_result_records)} report states from GEM results')
+        batch_size, item_count, batch = 100, 0, []
+
+        for result in gem_result_records:
+            batch.append(
+                self.report_state_dao.process_gem_result_to_report(result)
+            )
+            item_count += 1
+
+            if item_count == batch_size:
+                self.report_state_dao.insert_bulk(batch)
+                item_count = 0
+                batch.clear()
+
+        if item_count:
+            self.report_state_dao.insert_bulk(batch)
+
+        self.job_result = GenomicSubProcessResult.SUCCESS
+
+    def reconcile_appointment_events_from_metrics(self):
+        appointment_metrics_dao = GenomicAppointmentEventMetricsDao()
+        metrics_missing_appointments = appointment_metrics_dao.get_missing_appointments()
+
+        if not metrics_missing_appointments:
+            logging.info('There are no missing appointment events to reconcile')
+            self.job_result = GenomicSubProcessResult.NO_RESULTS
+            return
+
+        logging.info(f'Creating {len(metrics_missing_appointments)} missing appointment events from metrics')
+
+        metrics_to_update = []
+        for metric in metrics_missing_appointments:
+            try:
+                if not metric.appointment_event_id:
+                    logging.info(
+                        f'Inserting appointment event from metric_id {metric.id} for participant'
+                        f' {metric.participant_id}'
+                    )
+
+                    appointment_obj = {
+                        'participant_id': metric.participant_id,
+                        'event_type': metric.event_type,
+                        'event_authored_time': metric.event_authored_time,
+                        'created_from_metric_id': metric.id
+                    }
+
+                    message_body = json.loads(metric.appointment_event).get('messageBody')
+                    for k, value in message_body.items():
+                        key = 'appointment_id' if k == 'id' else k
+                        appointment_obj[key] = value
+
+                    appointment_obj = self.appointment_dao.get_model_obj_from_items(appointment_obj.items())
+                    self.appointment_dao.insert(appointment_obj)
+
+                metrics_to_update.append({
+                        'id': metric.id,
+                        'reconcile_job_run_id': self.job_run.id})
+
+            # pylint: disable=broad-except
+            except Exception as e:
+                logging.warning(e)
+                return GenomicSubProcessResult.ERROR
+
+        if metrics_to_update:
+            appointment_metrics_dao.bulk_update(metrics_to_update)
+
+        self.job_result = GenomicSubProcessResult.SUCCESS
+
+    def ingest_records_from_message_broker_data(self, *, message_record_id: int, event_type: str) -> None:
+
+        module_fields = ['module_type', 'result_type']
 
         def _set_genome_type(module):
             return {
@@ -442,105 +534,268 @@ class GenomicJobController:
                 'pgx_v1': config.GENOME_TYPE_WGS
             }[module.lower()]
 
-        if 'informing_loop' in event_type:
+        def _set_report_type(records):
+            # API currently doesnt support deletes for CVL samples
+            # https://docs.google.com/document/d/1E1tNSi1mWwhBSCs9Syprbzl5E0SH3c_9oLduG1mzlcY/edit#
+            report_state = GenomicReportState.UNSET
+
+            try:
+                result_record = list(filter(lambda x: x.fieldName == 'result_type', records))[0]
+                result_type = result_record.valueString.split('_')[0] \
+                    if '_' in result_record.valueString else result_record.valueString
+
+                report_map = {
+                    'pgx': [
+                        GenomicReportState.PGX_RPT_READY
+                    ],
+                    'hdr': [
+                        GenomicReportState.HDR_RPT_UNINFORMATIVE,
+                        GenomicReportState.HDR_RPT_POSITIVE
+                    ]
+                }[result_type]
+
+                hdr_result = list(filter(lambda x: x.fieldName == 'hdr_result_status', records))
+                if not hdr_result:
+                    report_state = report_map[0]
+                    return report_state
+
+                field_name = hdr_result[0].valueString.lower()
+                report_state = list(filter(lambda x: field_name in x.name.lower(), report_map))[0]
+                return report_state
+
+            # pylint: disable=broad-except
+            except Exception as e:
+                logging.warning(f'Cannot set report state type: message record{records[0].messageRecordId}: {e}')
+                return report_state
+
+        if self.job_id == GenomicJob.INGEST_INFORMING_LOOP:
             loop_type = event_type
-            informing_records = self.message_broker_event_dao.get_informing_loop(
+            informing_loop_records = self.message_broker_event_dao.get_informing_loop(
                 message_record_id,
                 loop_type
             )
 
-            if informing_records:
-                module_type = _set_module_type(informing_records)
-                if not module_type:
-                    logging.warning(f'Cannot find module type in message record id: '
-                                    f'{informing_records[0].messageRecordId}')
-                    self.job_result = GenomicSubProcessResult.ERROR
-                    return
-
-                first_record = informing_records[0]
-                logging.info(f'Inserting informing loop for Participant: {first_record.participantId}')
-
-                member = self.member_dao.get_member_by_participant_id(
-                    participant_id=first_record.participantId,
-                    genome_type=_set_genome_type(module_type)
+            if not informing_loop_records:
+                self.create_incident(
+                    source_job_run_id=self.job_run.id,
+                    code=GenomicIncidentCode.UNABLE_TO_RESOLVE_MESSAGE_BROKER_RECORD.name,
+                    message=f'Cannot find informing loop records in message_record_id: '
+                            f'{message_record_id}',
+                    slack=True
                 )
-                decision_value = [obj for obj in informing_records if obj.fieldName == 'decision_value' and
-                                  obj.valueString]
-                if not member:
-                    logging.warning(f'Cannot find member for informing loop insert: '
-                                    f'{informing_records[0].messageRecordId}')
-                    self.job_result = GenomicSubProcessResult.ERROR
-                    return
+                self.job_result = GenomicSubProcessResult.NO_RESULTS
+                return
 
-                loop_obj = GenomicInformingLoop(
-                        participant_id=first_record.participantId,
-                        message_record_id=first_record.messageRecordId,
-                        event_type=loop_type,
-                        event_authored_time=first_record.eventAuthoredTime,
-                        module_type=module_type,
-                        decision_value=decision_value[0].valueString if decision_value else None,
-                        sample_id=member.sampleId
-                )
+            module_type = GenomicMessageBroker.set_value_from_parsed_values(
+                informing_loop_records,
+                module_fields
+            )
 
-                self.informing_loop_dao.insert(loop_obj)
-                self.job_result = GenomicSubProcessResult.SUCCESS
+            if not module_type:
+                logging.warning(f'Cannot find module type in message record id: '
+                                f'{informing_loop_records[0].messageRecordId}')
+                self.job_result = GenomicSubProcessResult.ERROR
+                return
 
-        elif 'result_viewed' in event_type:
-            result_records = self.message_broker_event_dao.get_result_viewed(
+            first_record = informing_loop_records[0]
+            logging.info(f'Inserting informing loop for Participant: {first_record.participantId}')
+
+            member = self.member_dao.get_member_by_participant_id(
+                participant_id=first_record.participantId,
+                genome_type=_set_genome_type(module_type)
+            )
+            if not member:
+                logging.warning(f'Cannot find member for informing loop insert: '
+                                f'{first_record.messageRecordId}')
+                self.job_result = GenomicSubProcessResult.ERROR
+                return
+
+            decision_value = [obj for obj in informing_loop_records if obj.fieldName == 'decision_value' and
+                              obj.valueString]
+
+            loop_obj = self.informing_loop_dao.model_type(
+                participant_id=first_record.participantId,
+                message_record_id=first_record.messageRecordId,
+                event_type=loop_type,
+                event_authored_time=first_record.eventAuthoredTime,
+                module_type=module_type,
+                decision_value=decision_value[0].valueString if decision_value else None,
+                sample_id=member.sampleId
+            )
+
+            self.informing_loop_dao.insert(loop_obj)
+            self.job_result = GenomicSubProcessResult.SUCCESS
+
+        elif self.job_id == GenomicJob.INGEST_RESULT_VIEWED:
+            result_viewed_records = self.message_broker_event_dao.get_result_viewed(
                 message_record_id
             )
-            if result_records:
-                module_type = _set_module_type(result_records)
-                if not module_type:
-                    logging.warning(f'Cannot find module type in message record id: '
-                                    f'{result_records[0].messageRecordId}')
-                    return
 
-                first_record = result_records[0]
-                logging.info(f'Inserting result_viewed for Participant: {first_record.participantId}')
-
-                current_record = self.result_viewed_dao.get_result_record_by_pid_module(
-                    first_record.participantId,
-                    module_type
+            if not result_viewed_records:
+                self.create_incident(
+                    source_job_run_id=self.job_run.id,
+                    code=GenomicIncidentCode.UNABLE_TO_RESOLVE_MESSAGE_BROKER_RECORD.name,
+                    message=f'Cannot find result viewed records in message_record_id: '
+                            f'{message_record_id}',
+                    slack=True
                 )
+                self.job_result = GenomicSubProcessResult.NO_RESULTS
+                return
 
-                member = self.member_dao.get_member_by_participant_id(
+            module_type = GenomicMessageBroker.set_value_from_parsed_values(
+                result_viewed_records,
+                module_fields
+            )
+
+            if not module_type:
+                logging.warning(f'Cannot find module type in message record id: '
+                                f'{result_viewed_records[0].messageRecordId}')
+                return
+
+            first_record = result_viewed_records[0]
+            logging.info(f'Inserting result_viewed for Participant: {first_record.participantId}')
+
+            current_record = self.result_viewed_dao.get_result_record_by_pid_module(
+                first_record.participantId,
+                module_type
+            )
+
+            member = self.member_dao.get_member_by_participant_id(
+                participant_id=first_record.participantId,
+                genome_type=_set_genome_type(module_type)
+            )
+
+            if not member:
+                logging.warning(f'Cannot find member for result viewed insert: '
+                                f'{first_record.messageRecordId}')
+                self.job_result = GenomicSubProcessResult.ERROR
+                return
+
+            if not current_record:
+                result_viewed_obj = self.result_viewed_dao.model_type(
                     participant_id=first_record.participantId,
-                    genome_type=_set_genome_type(module_type)
+                    message_record_id=first_record.messageRecordId,
+                    event_type=event_type,
+                    event_authored_time=first_record.eventAuthoredTime,
+                    module_type=module_type,
+                    first_viewed=first_record.eventAuthoredTime,
+                    last_viewed=first_record.eventAuthoredTime,
+                    sample_id=member.sampleId
                 )
-
-                if not member:
-                    logging.warning(f'Cannot find member for result viewed insert: '
-                                    f'{result_records[0].messageRecordId}')
-                    self.job_result = GenomicSubProcessResult.ERROR
-                    return
-
-                if not current_record:
-                    result_obj = GenomicResultViewed(
-                        participant_id=first_record.participantId,
-                        message_record_id=first_record.messageRecordId,
-                        event_type=event_type,
-                        event_authored_time=first_record.eventAuthoredTime,
-                        module_type=module_type,
-                        first_viewed=first_record.eventAuthoredTime,
-                        last_viewed=first_record.eventAuthoredTime,
-                        sample_id=member.sampleId
-                    )
-                    self.result_viewed_dao.insert(result_obj)
-                    self.job_result = GenomicSubProcessResult.SUCCESS
-                    return
-
-                current_record.last_viewed = first_record.eventAuthoredTime
-                self.result_viewed_dao.update(current_record)
-
+                self.result_viewed_dao.insert(result_viewed_obj)
                 self.job_result = GenomicSubProcessResult.SUCCESS
+                return
+
+            current_record.last_viewed = first_record.eventAuthoredTime
+            self.result_viewed_dao.update(current_record)
+
+            self.job_result = GenomicSubProcessResult.SUCCESS
+
+        elif self.job_id == GenomicJob.INGEST_RESULT_READY:
+            result_ready_records = self.message_broker_event_dao.get_result_ready(
+                message_record_id
+            )
+
+            if not result_ready_records:
+                self.create_incident(
+                    source_job_run_id=self.job_run.id,
+                    code=GenomicIncidentCode.UNABLE_TO_RESOLVE_MESSAGE_BROKER_RECORD.name,
+                    message=f'Cannot find result ready records in message_record_id: '
+                            f'{message_record_id}',
+                    slack=True
+                )
+                self.job_result = GenomicSubProcessResult.NO_RESULTS
+                return
+
+            module_type = GenomicMessageBroker.set_value_from_parsed_values(
+                result_ready_records,
+                module_fields
+            )
+
+            if not module_type:
+                logging.warning(f'Cannot find module type in message record id: '
+                                f'{result_ready_records[0].messageRecordId}')
+                self.job_result = GenomicSubProcessResult.ERROR
+                return
+
+            first_record = result_ready_records[0]
+            logging.info(f'Inserting result_ready for Participant: {first_record.participantId}')
+
+            member = self.member_dao.get_member_by_participant_id(
+                participant_id=first_record.participantId,
+                genome_type=_set_genome_type(module_type)
+            )
+
+            if not member:
+                logging.warning(f'Cannot find member for result ready insert: '
+                                f'{first_record.messageRecordId}')
+                self.job_result = GenomicSubProcessResult.ERROR
+                return
+
+            report_type = _set_report_type(result_ready_records)
+            result_revision_number = GenomicMessageBroker.set_value_from_parsed_values(
+                result_ready_records,
+                ['report_revision_number']
+            )
+            report_obj = self.report_state_dao.model_type(
+                genomic_set_member_id=member.id,
+                genomic_report_state=report_type,
+                genomic_report_state_str=report_type.name,
+                participant_id=member.participantId,
+                module=module_type,
+                message_record_id=first_record.messageRecordId,
+                event_type=event_type,
+                event_authored_time=first_record.eventAuthoredTime,
+                sample_id=member.sampleId,
+                report_revision_number=result_revision_number,
+            )
+            self.report_state_dao.insert(report_obj)
+            self.job_result = GenomicSubProcessResult.SUCCESS
+
+        elif self.job_id == GenomicJob.INGEST_APPOINTMENT:
+
+            appointment_records = self.message_broker_event_dao.get_appointment_event(
+                message_record_id
+            )
+
+            if not appointment_records:
+                self.create_incident(
+                    source_job_run_id=self.job_run.id,
+                    code=GenomicIncidentCode.UNABLE_TO_RESOLVE_MESSAGE_BROKER_RECORD.name,
+                    message=f'Cannot find appointment records in message_record_id: '
+                            f'{message_record_id}',
+                    slack=True
+                )
+                self.job_result = GenomicSubProcessResult.NO_RESULTS
+                return
+
+            module_type = GenomicMessageBroker.set_value_from_parsed_values(
+                appointment_records,
+                module_fields
+            )
+
+            member = self.member_dao.get_member_by_participant_id(
+                participant_id=appointment_records[0].participantId,
+                genome_type=_set_genome_type(module_type)
+            )
+
+            if not member:
+                logging.warning(f'Cannot find member for appointment event insert: '
+                                f'{appointment_records[0].messageRecordId}')
+                self.job_result = GenomicSubProcessResult.ERROR
+                return
+
+            GenomicMessageBroker.ingest_appointment_data(appointment_records)
+
+            self.job_result = GenomicSubProcessResult.SUCCESS
 
     def accession_data_files(self, file_path, bucket_name):
         data_file_dao = GenomicGcDataFileDao()
 
-        if data_file_dao.get_with_file_path(file_path):
-            logging.info(f'{file_path} already exists.')
-            return 0
+        # TODO: Disabling this lookup until WGS data files stabilize
+        # if data_file_dao.get_with_file_path(file_path):
+        #     logging.info(f'{file_path} already exists.')
+        #     return 0
 
         # split file name
         file_attrs = self.parse_data_file_path(file_path)
@@ -639,24 +894,6 @@ class GenomicJobController:
             num_days=num_days
         )
 
-    def resolve_missing_gc_files(self, limit=800):
-        logging.info('Resolving missing gc data files')
-
-        files_to_resolve = self.missing_files_dao.get_files_to_resolve(limit)
-        if files_to_resolve:
-
-            resolve_arrays = [obj for obj in files_to_resolve if obj.identifier_type == 'chipwellbarcode']
-            if resolve_arrays:
-                self.missing_files_dao.batch_update_resolved_file(resolve_arrays)
-
-            resolve_wgs = [obj for obj in files_to_resolve if obj.identifier_type == 'sample_id']
-            if resolve_wgs:
-                self.missing_files_dao.batch_update_resolved_file(resolve_wgs)
-
-            logging.info('Resolving missing gc data files complete')
-        else:
-            logging.info('No missing gc data files to resolve')
-
     def update_member_aw2_missing_states_if_resolved(self):
         # get array member_ids that are resolved but still in GC_DATA_FILES_MISSING
         logging.info("Updating Array GC_DATA_FILES_MISSING members")
@@ -723,10 +960,10 @@ class GenomicJobController:
                         })
 
                         if len(files) % 10000 == 0:
-                            self.staging_dao.insert_filenames_bulk(files)
+                            self.staging_dao.insert_bulk(files)
                             files = []
 
-                self.staging_dao.insert_filenames_bulk(files)
+                self.staging_dao.insert_bulk(files)
 
     # Disabling job until further notice.
     # def reconcile_raw_to_aw1_ingested(self):
@@ -790,7 +1027,12 @@ class GenomicJobController:
             self.metrics_dao,
             self.manifest_file_dao,
             self.manifest_feedback_dao,
-            self.informing_loop_dao
+            self.informing_loop_dao,
+            self.cvl_result_past_due_dao,
+            self.report_state_dao,
+            self.result_viewed_dao,
+            self.appointment_dao,
+            self.event_dao
         ]
 
         for dao in reconcile_daos:
@@ -1009,42 +1251,6 @@ class GenomicJobController:
 
         return member
 
-    def run_reconciliation_to_data(self, *, genome_type):
-        """
-        Reconciles the metrics based on type of files using reconciler component
-        :param genome_type array or wgs
-        """
-        self.reconciler = GenomicReconciler(self.job_run.id, self.job_id,
-                                            storage_provider=self.storage_provider,
-                                            controller=self)
-
-        try:
-            # Set reconciler's bucket and filter queries on gc_site_id for each bucket
-            for bucket_name in self.bucket_name_list:
-                self.reconciler.bucket_name = bucket_name
-                site_id_mapping = config.getSettingJson(config.GENOMIC_GC_ID_MAPPING)
-
-                gc_site_id = 'rdr'
-
-                if 'baylor' in bucket_name.lower():
-                    baylor = 'baylor_{}'.format(genome_type)
-                    gc_site_id = site_id_mapping[baylor]
-
-                if 'broad' in bucket_name.lower():
-                    gc_site_id = site_id_mapping['broad']
-
-                if 'northwest' in bucket_name.lower():
-                    gc_site_id = site_id_mapping['northwest']
-
-                # Run the reconciliation by GC
-                self.job_result = self.reconciler.reconcile_metrics_to_data_files(
-                    genome_type,
-                    _gc_site_id=gc_site_id
-                )
-
-        except RuntimeError:
-            self.job_result = GenomicSubProcessResult.ERROR
-
     def run_new_participant_workflow(self):
         """
         Creates new GenomicSet, GenomicSetMembers,
@@ -1181,32 +1387,7 @@ class GenomicJobController:
             except RuntimeError:
                 self.job_result = GenomicSubProcessResult.ERROR
 
-    def run_cvl_reconciliation_report(self):
-        """
-        Creates the CVL reconciliation report using the reconciler object
-        """
-        self.reconciler = GenomicReconciler(
-            self.job_run.id, self.job_id, bucket_name=self.bucket_name, controller=self
-        )
-        try:
-            cvl_result = self.reconciler.generate_cvl_reconciliation_report()
-            if cvl_result == GenomicSubProcessResult.SUCCESS:
-                logging.info(f'CVL reconciliation report created: {self.reconciler.cvl_file_name}')
-                # Insert the file record
-                self.file_processed_dao.insert_file_record(
-                    self.job_run.id,
-                    f'{self.bucket_name}/{self.reconciler.cvl_file_name}',
-                    self.bucket_name,
-                    self.reconciler.cvl_file_name,
-                    end_time=clock.CLOCK.now(),
-                    file_result=cvl_result
-                )
-                self.subprocess_results.add(cvl_result)
-            self.job_result = self._aggregate_run_results()
-        except RuntimeError:
-            self.job_result = GenomicSubProcessResult.ERROR
-
-    def generate_manifest(self, manifest_type, _genome_type, **kwargs):
+    def generate_manifest(self, manifest_type, genome_type, **kwargs):
         """
         Creates Genomic manifest using ManifestCompiler component
         """
@@ -1226,7 +1407,7 @@ class GenomicJobController:
                 version_num = kwargs['feedback_record'].version
                 result = self.manifest_compiler.generate_and_transfer_manifest(
                     manifest_type,
-                    _genome_type,
+                    genome_type,
                     version=version_num + 1,
                     input_manifest=input_manifest
                 )
@@ -1234,7 +1415,8 @@ class GenomicJobController:
             else:
                 result = self.manifest_compiler.generate_and_transfer_manifest(
                     manifest_type,
-                    _genome_type
+                    genome_type,
+                    pipeline_id=kwargs.get('pipeline_id')
                 )
 
             if result.get('code') == GenomicSubProcessResult.NO_FILES:
@@ -1245,39 +1427,39 @@ class GenomicJobController:
                     and self.manifests_generated:
 
                 now_time = datetime.utcnow()
-
                 for manifest in self.manifests_generated:
+
                     compiled_file_name = manifest["file_path"].split(f'{self.bucket_name}/')[-1]
                     logging.info(f'Manifest created: {compiled_file_name}')
                     new_manifest_record = self.manifest_file_dao.get_manifest_file_from_filepath(manifest['file_path'])
 
                     if not new_manifest_record:
-                        # Insert manifest_file record
-                        new_manifest_obj = GenomicManifestFile(
-                            uploadDate=now_time,
-                            manifestTypeId=manifest_type,
-                            manifestTypeIdStr=manifest_type.name,
-                            filePath=manifest['file_path'],
-                            bucketName=self.bucket_name,
-                            recordCount=manifest['record_count'],
-                            rdrProcessingComplete=1,
-                            rdrProcessingCompleteDate=now_time,
-                            fileName=manifest['file_path'].split('/')[-1]
+                        # MANIFEST record created
+                        new_manifest_record = self.manifest_file_dao.insert(
+                            GenomicManifestFile(
+                                uploadDate=now_time,
+                                manifestTypeId=manifest_type,
+                                manifestTypeIdStr=manifest_type.name,
+                                filePath=manifest['file_path'],
+                                bucketName=self.bucket_name,
+                                recordCount=manifest['record_count'],
+                                rdrProcessingComplete=1,
+                                rdrProcessingCompleteDate=now_time,
+                                fileName=manifest['file_path'].split('/')[-1]
+                            )
                         )
-                        new_manifest_record = self.manifest_file_dao.insert(new_manifest_obj)
 
-                    # update feedback records if manifest is a feedback manifest
+                    # MANIFEST FEEDBACK record updated
                     if "feedback_record" in kwargs.keys():
                         r = kwargs['feedback_record']
                         r.feedbackManifestFileId = new_manifest_record.id
                         r.feedbackComplete = 1
                         r.version += 1
                         r.feedbackCompleteDate = now_time
-
                         with self.manifest_feedback_dao.session() as session:
                             session.merge(r)
 
-                    # Insert the file_processed record
+                    # FILE Processed record
                     self.file_processed_dao.insert_file_record(
                         self.job_run.id,
                         f'{self.bucket_name}/{self.manifest_compiler.output_file_name}',
@@ -1289,36 +1471,36 @@ class GenomicJobController:
                         manifest_file_id=new_manifest_record.id
                     )
 
-                    file_record_attr = self.update_member_file_record(manifest_type)
-                    if self.member_ids_for_update and file_record_attr:
-                        self.execute_cloud_task({
-                            'member_ids': self.member_ids_for_update,
-                            'field': file_record_attr,
-                            'value': new_manifest_record.id,
-                        }, 'genomic_set_member_update_task')
+                    # MEMBER/METRICS AW3 Manifest file record update
+                    self.process_research_manifest_record_updates(
+                        manifest_type,
+                        manifest_id=new_manifest_record.id,
+                        member_ids=manifest.get('member_ids'),
+                        pipeline_id=kwargs.get('pipeline_id'),
+                    )
 
-                    self.subprocess_results.add(result["code"])
+                    self.subprocess_results.add(result.get('code'))
 
             self.job_result = result.get('code')
 
         except RuntimeError:
             self.job_result = GenomicSubProcessResult.ERROR
 
-    def reconcile_report_states(self, _genome_type=None):
+    def reconcile_report_states(self, genome_type=None):
         """
         Wrapper for the Reconciler reconcile_report_states_for_consent_removal
         and reconcile_rhp_report_states
-        :param _genome_type: array or wgs
+        :param genome_type: array or wgs
         """
 
         self.reconciler = GenomicReconciler(self.job_run.id, self.job_id, controller=self)
 
-        if _genome_type == GENOME_TYPE_ARRAY:
+        if genome_type == GENOME_TYPE_ARRAY:
             workflow_states = [GenomicWorkflowState.GEM_RPT_READY,
                                GenomicWorkflowState.A1,
                                GenomicWorkflowState.A2]
 
-        elif _genome_type == GENOME_TYPE_WGS:
+        elif genome_type == GENOME_TYPE_WGS:
             workflow_states = [GenomicWorkflowState.CVL_READY]
 
         else:
@@ -1336,55 +1518,67 @@ class GenomicJobController:
         Currently supports GEM, HDR or PGx.
         """
         modules = {key.split('.')[0] for key in informing_loop_event_mappings.keys()}
-        event_mappings = informing_loop_event_mappings
+
         for module in modules:
-            # Get unreconciled user_event_metrics records
-            latest_events = self.event_dao.get_latest_events(module)
+            # Get mismatches between user_event_metrics and genomic_informing_loop
+            missed_messages = self.event_dao.get_event_message_informing_loop_mismatches(module=module)
 
-            # compare to latest state by participant in genomic_informing_loop
-            if latest_events:
-                update_pids = []
-                for event in latest_events:
-                    incident_message = f'{self.job_id.name}: Informing Loop out of sync with User Events! ' \
-                                       f'PID: {event.participant_id}'
-                    incident_params = {
-                        "source_job_run_id": self.job_run.id,
-                        "code": GenomicIncidentCode.INFORMING_LOOP_TO_EVENTS_MISMATCH.name,
-                        "message": incident_message,
-                        "participant_id": event.participant_id,
-                        "save_incident": True,
-                        "slack": True
-                    }
-
-                    latest_state = self.informing_loop_dao.get_latest_state_for_pid(event.participant_id)
-                    if latest_state:
-                        # Parse informing loop state
-                        latest_state = [x for x in latest_state[0] if x]
-                        lookup_state = f"{module}.{'.'.join(latest_state)}"
-                        try:
-                            if event.event_name != event_mappings[lookup_state]:
-                                # create incident
-                                self.create_incident(**incident_params)
-                            else:
-                                # add to update_pids reconcile_job_run_id
-                                update_pids.append(event.participant_id)
-                        except KeyError:
-                            incident_params['message'] = f'{self.job_id.name}: Key Error on IL lookup.' \
-                                                         f'PID: {event.participant_id}'
-                            self.create_incident(**incident_params)
-                    else:
-                        # No informing loop for pid, create incident
-                        self.create_incident(**incident_params)
-
-                if update_pids:
-                    self.event_dao.update_reconcile_job_pids(
-                        pid_list=update_pids,
-                        job_run_id=self.job_run.id,
-                        module=module
+            # Create new genomic_informing_loop records
+            if missed_messages:
+                for message in missed_messages:
+                    new_il_record = self.informing_loop_dao.model_type(
+                        participant_id=message.participant_id,
+                        event_type="informing_loop_decision",
+                        event_authored_time=message.created_at,
+                        module_type=module,
+                        decision_value=message.event_value,
+                        sample_id=message.sample_id,
+                        created_from_metric_id=message.event_id
                     )
 
-    def delete_old_gp_user_event_metrics(self, days=7):
-        self.event_dao.delete_old_events(days=days)
+                    self.informing_loop_dao.insert(new_il_record)
+
+    def reconcile_message_broker_results_ready(self):
+        mappings = message_broker_report_ready_event_state_mappings
+
+        # Get mismatches between user_event_metrics and genomic_member_report_state
+        for module in cvl_result_reconciliation_modules:
+            missed_messages = self.event_dao.get_event_message_results_ready_mismatches(module=module)
+
+            if missed_messages:
+                for message in missed_messages:
+                    new_report_state_record = self.report_state_dao.model_type(
+                        genomic_set_member_id=message.member_id,
+                        genomic_report_state=mappings[message.event_name],
+                        genomic_report_state_str=mappings[message.event_name].name,
+                        participant_id=message.participant_id,
+                        event_type="result_ready",
+                        event_authored_time=message.created_at,
+                        module=cvl_result_reconciliation_modules[module],
+                        sample_id=message.sample_id,
+                        created_from_metric_id=message.event_id,
+                    )
+
+                    self.report_state_dao.insert(new_report_state_record)
+
+    def reconcile_message_broker_results_viewed(self):
+        # Get mismatches between user_event_metrics and genomic_report_viewed
+        for module in cvl_result_reconciliation_modules:
+            missed_messages = self.event_dao.get_event_message_results_viewed_mismatches(module=module)
+
+            if missed_messages:
+                for message in missed_messages:
+                    new_result_viewed_record = self.result_viewed_dao.model_type(
+                        participant_id=message.participant_id,
+                        event_type="result_viewed",
+                        event_authored_time=message.created_at,
+                        module_type=cvl_result_reconciliation_modules[module],
+                        first_viewed=message.created_at,
+                        last_viewed=message.created_at,
+                        sample_id=message.sample_id,
+                        created_from_metric_id=message.event_id
+                    )
+                    self.result_viewed_dao.insert(new_result_viewed_record)
 
     def run_general_ingestion_workflow(self):
         """
@@ -1495,35 +1689,160 @@ class GenomicJobController:
         logging.warning(message)
 
     def update_members_blocklists(self):
-        members = self.member_dao.get_members_from_date()
+
+        def _get_blocklist_str_attributes(all_values, map_values):
+            attrs = []
+            for values in all_values:
+                for val in values:
+                    attrs.append(f'GenomicSetMember.{val.get("attribute")}')
+            for values in map_values:
+                for val in values:
+                    attrs.append(f'GenomicSetMember.{val.get("key")}')
+            return set(attrs)
+
+        member_blocklists_config = config.getSettingJson(GENOMIC_MEMBER_BLOCKLISTS, {})
+
+        if not member_blocklists_config:
+            self.job_result = GenomicSubProcessResult.MISSING_CONFIG
+            return
+
+        blocklists_map = {
+            'block_research': {
+                'block_attributes': [
+                    {
+                        'key': 'blockResearch',
+                        'value': 1
+                    },
+                    {
+                        'key': 'blockResearchReason',
+                        'value': None
+                    }
+                ],
+            },
+            'block_results': {
+                'block_attributes': [
+                    {
+                        'key': 'blockResults',
+                        'value': 1
+                    },
+                    {
+                        'key': 'blockResultsReason',
+                        'value': None
+                    }
+                ]
+            }
+        }
+
+        member_values = member_blocklists_config.values()
+        block_attr_values = [obj['block_attributes'] for obj in blocklists_map.values()]
+
+        members = self.member_dao.get_blocklist_members_from_date(
+            attributes=_get_blocklist_str_attributes(
+                member_values,
+                block_attr_values
+            )
+        )
 
         if not members:
+            self.job_result = GenomicSubProcessResult.NO_RESULTS
             return
 
         logging.info(f'Checking {len(members)} newly added/modified genomic member(s) for updating blocklists')
 
-        for member in members:
-            self.member_dao.update_member_blocklists(member)
+        try:
+            updated_members = []
 
-        self.job_result = GenomicSubProcessResult.SUCCESS
+            for member in members:
+                member_dict = {'id': member.id}
+                for block_map_type, block_map_type_config in blocklists_map.items():
+                    blocklist_config_items = member_blocklists_config.get(block_map_type, None)
 
-    @staticmethod
-    def update_member_file_record(manifest_type):
-        file_attr = None
+                    for item in blocklist_config_items:
+                        if not hasattr(member, item.get('attribute')):
+                            continue
+                        current_attr_value, evaluate_value = getattr(member, item.get('attribute')), item.get('value')
+                        if (isinstance(item.get('value'), list) and
+                            current_attr_value in evaluate_value) or \
+                                current_attr_value == evaluate_value:
 
-        attributes_map = {
-            GenomicManifestTypes.AW3_ARRAY: 'aw3ManifestFileId',
-            GenomicManifestTypes.AW3_WGS: 'aw3ManifestFileId'
-        }
-        if manifest_type in attributes_map.keys():
-            file_attr = attributes_map[manifest_type]
+                            for attr in block_map_type_config.get('block_attributes'):
+                                value = item.get('reason_string') if not attr['value'] else attr['value']
 
-        return file_attr
+                                if getattr(member, attr['key']) is None or getattr(member, attr['key']) == 0:
+                                    member_dict[attr['key']] = value
 
-    @staticmethod
-    def check_w1il_gror_resubmit(since_datetime):
-        dao = GenomicQueriesDao()
-        participant_list = dao.get_w1il_yes_no_yes_participants(start_datetime=since_datetime)
+                if len(member_dict) > 1:
+                    updated_members.append(member_dict)
+
+            if not updated_members:
+                self.job_result = GenomicSubProcessResult.NO_RESULTS
+                return
+
+            logging.info(f'Updating {len(updated_members)} genomic member(s) blocklists')
+            self.member_dao.bulk_update(updated_members)
+
+            self.job_result = GenomicSubProcessResult.SUCCESS
+
+        # pylint: disable=broad-except
+        except Exception as e:
+            logging.error(e)
+            self.job_result = GenomicSubProcessResult.ERROR
+
+    def process_research_manifest_record_updates(
+        self,
+        manifest_type: GenomicManifestTypes,
+        manifest_id: GenomicManifestFile,
+        member_ids: List[int],
+        **kwargs
+    ) -> None:
+        if manifest_type not in [
+            GenomicManifestTypes.AW3_ARRAY, GenomicManifestTypes.AW3_WGS
+        ]:
+            return
+
+        if member_ids:
+            process_metrics = self.metrics_dao.get_bulk_metrics_for_process_update(
+                member_ids=member_ids,
+                pipeline_id=kwargs.get('pipeline_id')
+            )
+            members_to_update, metrics_to_update, batch_size = [], [], 100
+
+            # member
+            for member_id in member_ids:
+                member_dict = {
+                    'id': member_id,
+                    'aw3ManifestFileId': manifest_id
+                }
+                members_to_update.append(member_dict)
+
+                if len(members_to_update) == batch_size:
+                    self.member_dao.bulk_update(members_to_update)
+                    members_to_update.clear()
+
+            if members_to_update:
+                self.member_dao.bulk_update(members_to_update)
+
+            # metrics
+            for metric in process_metrics:
+                metric_dict = {
+                    'id': metric.id,
+                    'aw3ReadyFlag': 0,
+                    'aw3ManifestJobRunID': self.job_run.id,
+                    'aw3ManifestFileId': manifest_id,
+                    'processingCount': metric.processingCount + 1
+                }
+                metrics_to_update.append(metric_dict)
+
+                if len(metrics_to_update) == batch_size:
+                    self.metrics_dao.bulk_update(metrics_to_update)
+                    metrics_to_update.clear()
+
+            if metrics_to_update:
+                self.metrics_dao.bulk_update(metrics_to_update)
+        return
+
+    def check_w1il_gror_resubmit(self, since_datetime):
+        participant_list = self.query_dao.get_w1il_yes_no_yes_participants(start_datetime=since_datetime)
 
         logging.warning(
             f'The following {len(participant_list)} participants '
@@ -1531,29 +1850,157 @@ class GenomicJobController:
             ','.join([f'{participant.participantId}' for participant in participant_list])
         )
 
-        notification_email_address = config.getSettingJson(config.RDR_GENOMICS_NOTIFICATION_EMAIL, default=None)
-        if notification_email_address and participant_list:
+        notification_emails = config.getSettingJson(config.RDR_GENOMICS_NOTIFICATION_EMAIL, default=None)
+        if notification_emails and participant_list:
             message = 'The following participants recently provided GROR consent again ' \
                       '(after having appeared in a W1IL manifest and then revoking their GROR consent):\n\n'
             message += '\n'.join([f'P{participant.participantId}' for participant in participant_list])
 
             EmailService.send_email(
                 Email(
-                    recipients=[notification_email_address],
+                    recipients=notification_emails,
                     subject='GHR3 participants recently re-submitting GROR consent',
                     plain_text_content=message
                 )
             )
 
+        self.job_result = GenomicSubProcessResult.SUCCESS
+
+    def check_results_withdrawals(self):
+        result_withdrawals = self.query_dao.get_results_withdrawn_participants()
+
+        if not result_withdrawals:
+            logging.info('There are no new withdrawal records in the genomic results pipeline')
+            self.job_result = GenomicSubProcessResult.NO_RESULTS
+            return
+
+        result_withdrawal_dao = GenomicResultWithdrawalsDao()
+
+        logging.warning(f'There are {len(result_withdrawals)} new withdrawal records in the genomics result pipeline')
+
+        batch = []
+        for result in result_withdrawals:
+            result = result._asdict()
+            result['created'] = clock.CLOCK.now()
+            result['modified'] = clock.CLOCK.now()
+            batch.append(result)
+
+        result_withdrawal_dao.insert_bulk(batch)
+
+        notification_emails = config.getSettingJson(config.RDR_GENOMICS_NOTIFICATION_EMAIL, default=None)
+
+        if notification_emails:
+            for email_type in ['GEM', 'HEALTH']:
+                current_list = list(
+                    filter(lambda x: x.array_results is True if 'GEM' in email_type else x.cvl_results is True,
+                           result_withdrawals))
+
+                if current_list:
+                    message = 'The following participants have withdrawn from the program and are currently '
+                    message += f'in the genomics {email_type} result pipeline\n\n'
+                    message += '\n'.join([f'P{participant.participant_id}' for participant in current_list])
+                    message += '\n'
+
+                    EmailService.send_email(
+                        Email(
+                            recipients=notification_emails,
+                            subject=f'Withdrawn participants in genomic results pipeline(s): {email_type}',
+                            plain_text_content=message
+                        )
+                    )
+
+        self.job_result = GenomicSubProcessResult.SUCCESS
+
+    def check_aw3_ready_missing_files(self):
+        """ Runs report to email list of samples that are ready for AW3 manifest generation but missing data files"""
+        notification_email_address = config.getSettingJson(config.RDR_GENOMICS_NOTIFICATION_EMAIL, default=None)
+
+        array_missing_data = self.query_dao.get_missing_data_files_for_aw3(
+            genome_type=config.GENOME_TYPE_ARRAY
+        )
+        wgs_missing_data = self.query_dao.get_missing_data_files_for_aw3(
+            genome_type=config.GENOME_TYPE_WGS
+        )
+        if notification_email_address and any((array_missing_data, wgs_missing_data)):
+            message = 'The following samples matched AW3 manifest criteria except for the data file count:\n\n'
+            message += 'sample_id, aw2 manifest date, genome_type\n'
+            message += '\n'.join([f'{sample[0]}, {sample[1]}, aou_array' for sample in array_missing_data])
+            message += '\n'
+            message += '\n'.join([f'{sample[0]}, {sample[1]}, aou_wgs' for sample in wgs_missing_data])
+            message += '\n'
+            EmailService.send_email(
+                Email(
+                    recipients=notification_email_address,
+                    subject='AW3 ready samples with missing data files',
+                    plain_text_content=message
+                )
+            )
+        self.job_result = GenomicSubProcessResult.SUCCESS
+
+    def check_appointments_gror_changed(self):
+        """ Alerts Color when a participant with scheduled appointment has withdrawn GRoR consent """
+        notification_email_address = config.getSetting(config.GENOMIC_COLOR_PM_EMAIL, default=None)
+        notified_dao = GenomicAppointmentEventNotifiedDao()
+        changed_gror = self.appointment_dao.get_appointments_gror_changed()
+        notified_appointments = []
+        if notification_email_address and changed_gror:
+            body = "Participants with scheduled GC appointments and changed GRoR:\n"
+            body += "participant_id,appointment_id,event_authored_time\n"
+            for appointment in changed_gror:
+                body += f'{appointment.participant_id}, {appointment.appointment_id}, '
+                body += f'{appointment.event_authored_time}\n'
+                notified_appointments.append({
+                    'participant_id': appointment.participant_id,
+                    'appointment_event_id': appointment.id,
+                    'created': clock.CLOCK.now(),
+                    'modified': clock.CLOCK.now()
+                })
+            EmailService.send_email(
+                Email(
+                    recipients=notification_email_address,
+                    subject='GC Appointments With GRoR Changed Participants',
+                    plain_text_content=body
+                )
+            )
+            notified_dao.insert_bulk(notified_appointments)
+            self.job_result = GenomicSubProcessResult.SUCCESS
+        else:
+            self.job_result = GenomicSubProcessResult.NO_RESULTS
+
+    def check_gcr_14day_escalation(self):
+        """Alerts color when participant with hdr positive result does not have a scheduled or completed appointment"""
+        notified_dao = GenomicDefaultBaseDao(model_type=GenomicGCROutreachEscalationNotified)
+        notification_email_addresses = config.getSettingList(config.GENOMIC_GCR_ESCALATION_EMAILS, default=None)
+        escalate_participants = self.report_state_dao.get_hdr_result_positive_no_appointment()
+        escalate_pids = [pid[0] for pid in escalate_participants]
+        if notification_email_addresses and escalate_pids:
+            notified_participants = []
+            for pid in escalate_participants:
+                EmailService.send_email(
+                    Email(
+                        recipients=notification_email_addresses,
+                        subject='GCR Outreach 14 Day Escalation',
+                        plain_text_content=str(pid)
+                    )
+                )
+                notified_participants.append({
+                    'participant_id': pid,
+                    'created': clock.CLOCK.now(),
+                    'modified': clock.CLOCK.now()
+                })
+
+            notified_dao.insert_bulk(notified_participants)
+            self.job_result = GenomicSubProcessResult.SUCCESS
+        else:
+            self.job_result = GenomicSubProcessResult.NO_RESULTS
+
     @staticmethod
     def execute_cloud_task(payload, endpoint):
-        if GAE_PROJECT != 'localhost':
-            _task = GCPCloudTask()
-            _task.execute(
-                endpoint,
-                payload=payload,
-                queue='genomics'
-            )
+        if GAE_PROJECT == 'localhost':
+            return
+
+        cloud_task = GCPCloudTask()
+        cloud_task.execute(endpoint=endpoint, payload=payload, queue='genomics')
 
     def _end_run(self):
         """Updates the genomic_job_run table with end result"""
@@ -1587,7 +2034,6 @@ class GenomicJobController:
 
     def _create_run(self, job_id):
         new_run = self.job_run_dao.insert_run_record(job_id)
-
         return new_run
 
     def _compile_accesioning_failure_alert_email(self, alert_files) -> Email:

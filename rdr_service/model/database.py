@@ -8,11 +8,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
-from rdr_service.model.base import Base, MetricsBase
+from rdr_service.model.base import Base, MetricsBase, RexBase, NphBase
 
 # All tables in the schema should be imported below here.
 # pylint: disable=unused-import
 from rdr_service.model.api_user import ApiUser
+from rdr_service.model.etm import EtmQuestionnaire, EtmQuestionnaireResponse, EtmQuestionnaireResponseAnswer, \
+    EtmQuestionnaireResponseMetadata
 from rdr_service.model.participant import Participant, ParticipantHistory
 from rdr_service.model.participant_incentives import ParticipantIncentives
 from rdr_service.model.participant_summary import ParticipantSummary
@@ -27,6 +29,7 @@ from rdr_service.model.calendar import Calendar
 from rdr_service.model.deceased_report import DeceasedReport
 from rdr_service.model.deceased_report_import_record import DeceasedReportImportRecord
 from rdr_service.model.ehr import EhrReceipt, ParticipantEhrReceipt
+from rdr_service.model.enrollment_status_history import EnrollmentStatusHistory
 from rdr_service.model.ghost_api_check import GhostApiCheck
 from rdr_service.model.hpo import HPO
 from rdr_service.model.hpro_consent_files import HealthProConsentFile
@@ -36,6 +39,7 @@ from rdr_service.model.metric_set import AggregateMetrics, MetricSet
 from rdr_service.model.metrics import MetricsVersion, MetricsBucket
 from rdr_service.model.metrics_cache import MetricsEnrollmentStatusCache, MetricsAgeCache, MetricsRaceCache, \
   MetricsRegionCache, MetricsGenderCache, MetricsLanguageCache, MetricsLifecycleCache
+from rdr_service.model.obfuscation import Obfuscation
 from rdr_service.model.organization import Organization
 from rdr_service.model.questionnaire import Questionnaire, QuestionnaireHistory, QuestionnaireQuestion
 from rdr_service.model.questionnaire import QuestionnaireConcept
@@ -66,6 +70,11 @@ from rdr_service.model.retention_eligible_metrics import RetentionEligibleMetric
 from rdr_service.model.ce_health_reconciliation import CeHealthReconciliation
 from rdr_service.model.onsite_id_verification import OnsiteIdVerification
 from rdr_service.model.curation_etl import CdrEtlRunHistory, CdrEtlSurveyHistory, CdrExcludedCode
+from rdr_service.model.profile_update import ProfileUpdate
+
+from rdr_service.model.study_nph import Participant
+from rdr_service.model.rex import Study
+
 
 RETRY_CONNECTION_LIMIT = 10
 
@@ -101,6 +110,12 @@ class Database(object):
 
     def create_metrics_schema(self):
         MetricsBase.metadata.create_all(self._engine)
+
+    def create_rex_schema(self):
+        RexBase.metadata.create_all(self._engine)
+
+    def create_nph_schema(self):
+        NphBase.metadata.create_all(self._engine)
 
     def make_session(self) -> Session:
         return self._Session()

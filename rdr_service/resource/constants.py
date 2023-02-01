@@ -42,6 +42,10 @@ class SchemaID(IntEnum):
     genomic_manifest_feedback = 3060
     genomic_user_event_metrics = 3070
     genomic_informing_loop = 3080
+    genomic_cvl_result_past_due = 3090
+    genomic_member_report_state = 3100
+    genomic_result_viewed = 3110
+    genomic_appointment_event = 3120
 
     # Workbench
     workbench_researcher = 4000
@@ -54,6 +58,10 @@ class SchemaID(IntEnum):
     workbench_researcher_degree = 4070
     workbench_workspace_age = 4080
     workbench_workspace_ethnicity = 4090
+    workbench_researcher_short_tier_names = 4100
+    workbench_researcher_dsv2_ethnic_category = 4110
+    workbench_researcher_dsv2_gender_identity = 4120
+    workbench_researcher_dsv2_sexual_orientation = 4130
 
     # Covid study
     biobank_covid_antibody_sample = 5000
@@ -93,6 +101,7 @@ class PDREnrollmentStatusEnum(IntEnum):
     Registered = 10  # EnrollmentStatusV2.REGISTERED
     Participant = 20  # EnrollmentStatusV2.PARTICIPANT
     ParticipantPlusEHR = 30  # EnrollmentStatusV2.FULLY_CONSENTED
+    ParticipantPMBEligible = 35 # N/A in EnrollmentStatusV2
     CoreParticipantMinusPM = 40  # EnrollmentStatusV2.CORE_MINUS_PM
     CoreParticipant = 50  # EnrollmentStatusV2.CORE_PARTICIPANT
 
@@ -149,6 +158,7 @@ class ParticipantEventEnum(IntEnum):
     REGISTERED = 100
     PARTICIPANT = 104
     FULLY_CONSENTED = 108
+    PMB_ELIGIBLE = 110
     CORE_MINUS_PM = 112
     CORE_PARTICIPANT = 114
 

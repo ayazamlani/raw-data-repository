@@ -13,7 +13,8 @@ from rdr_service.dao.bq_genomics_dao import bq_genomic_set_batch_update, bq_geno
     bq_genomic_job_run_batch_update, bq_genomic_file_processed_batch_update, \
     bq_genomic_gc_validation_metrics_batch_update, bq_genomic_manifest_file_batch_update, \
     bq_genomic_manifest_feedback_batch_update
-from rdr_service.dao.genomics_dao import GenomicManifestFileDao, GenomicCloudRequestsDao, GenomicSetMemberDao
+from rdr_service.dao.genomics_dao import GenomicManifestFileDao, GenomicCloudRequestsDao, GenomicSetMemberDao, \
+    GenomicGCValidationMetricsDao
 from rdr_service.genomic.genomic_job_components import GenomicFileIngester
 from rdr_service.genomic.genomic_job_controller import GenomicJobController
 from rdr_service.genomic_enums import GenomicJob, GenomicManifestTypes
@@ -22,8 +23,9 @@ from rdr_service.offline import genomic_pipeline
 from rdr_service.resource.generators.genomics import genomic_set_batch_update, genomic_set_member_batch_update, \
     genomic_job_run_batch_update, genomic_file_processed_batch_update, genomic_gc_validation_metrics_batch_update, \
     genomic_manifest_file_batch_update, genomic_manifest_feedback_batch_update, \
-    genomic_user_event_metrics_batch_update, \
-    genomic_informing_loop_batch_update
+    genomic_user_event_metrics_batch_update, genomic_informing_loop_batch_update, \
+    genomic_cvl_result_past_due_batch_update, genomic_member_report_state_batch_update, \
+    genomic_result_viewed_batch_update, genomic_appointment_event_batch_update
 from rdr_service.services.system_utils import JSONObject
 
 
@@ -33,6 +35,7 @@ class BaseGenomicTaskApi(Resource):
         self.data = None
         self.cloud_req_dao = GenomicCloudRequestsDao()
         self.member_dao = GenomicSetMemberDao()
+        self.metrics_dao = GenomicGCValidationMetricsDao()
         self.file_paths = None
         self.disallowed_jobs = []
 
@@ -376,13 +379,14 @@ class IngestDataFilesTaskApi(BaseGenomicTaskApi):
         return {"success": True}
 
 
-class IngestFromMessageBrokerDataApi(BaseGenomicTaskApi):
+class IngestGenomicMessageBrokerDataApi(BaseGenomicTaskApi):
     """
-    Cloud Task endpoint: Ingest informing loop started/decision
-    and result_viewed from Message Broker Event Data
+    Cloud Task endpoint: Ingesting Message Broker event data
+    informing_loop(s), result_viewed, result_ready
     """
+
     def post(self):
-        super(IngestFromMessageBrokerDataApi, self).post()
+        super(IngestGenomicMessageBrokerDataApi, self).post()
 
         if not self.data.get('event_type') or not self.data.get('message_record_id'):
             logging.warning('Event type and message record id is required for ingestion from Message broker')
@@ -396,6 +400,7 @@ class IngestFromMessageBrokerDataApi(BaseGenomicTaskApi):
         ingest_method_map = {
             'informing_loop': GenomicJob.INGEST_INFORMING_LOOP,
             'result_viewed': GenomicJob.INGEST_RESULT_VIEWED,
+            'result_ready': GenomicJob.INGEST_RESULT_READY
         }
 
         job_type = ingest_method_map[
@@ -404,7 +409,37 @@ class IngestFromMessageBrokerDataApi(BaseGenomicTaskApi):
 
         with GenomicJobController(job_type) as controller:
             controller.ingest_records_from_message_broker_data(
-                message_record_id=self.data['message_record_id'],
+                message_record_id=self.data.get('message_record_id'),
+                event_type=event_type
+            )
+
+        self.create_cloud_record()
+
+        logging.info('Complete.')
+        return {"success": True}
+
+
+class IngestGenomicMessageBrokerAppointmentApi(BaseGenomicTaskApi):
+    """
+    Cloud Task endpoint: Ingesting Message Broker event data
+    appointments only
+    """
+
+    def post(self):
+        super(IngestGenomicMessageBrokerAppointmentApi, self).post()
+
+        if not self.data.get('message_record_id'):
+            logging.warning('Event type and message record id is required for ingestion from Message broker')
+
+            return {"success": False}
+
+        event_type = self.data.get('event_type')
+
+        logging.info(f'Ingesting {event_type}')
+
+        with GenomicJobController(GenomicJob.INGEST_APPOINTMENT) as controller:
+            controller.ingest_records_from_message_broker_data(
+                message_record_id=self.data.get('message_record_id'),
                 event_type=event_type
             )
 
@@ -431,6 +466,31 @@ class IngestUserEventMetricsApi(BaseGenomicTaskApi):
                                   ) as controller:
             controller.ingest_metrics_file(
                 metric_type='user_events',
+                file_path=self.data['file_path']
+            )
+
+        self.create_cloud_record()
+
+        logging.info('Complete.')
+        return {"success": True}
+
+
+class IngestAppointmentMetricsApi(BaseGenomicTaskApi):
+    """
+    Cloud task endpoint: Inserting records for GHR3 appointment metrics
+    """
+    def post(self):
+        super(IngestAppointmentMetricsApi, self).post()
+
+        if not self.data.get('file_path'):
+            logging.warning('Can not run appointment ingestion for missing file path')
+            return {"success": False}
+
+        logging.info(f"Ingesting appointment metrics for {self.data.get('file_path')}")
+
+        with GenomicJobController(GenomicJob.APPOINTMENT_METRICS_FILE_INGEST,
+                                  ) as controller:
+            controller.ingest_appointment_metrics_file(
                 file_path=self.data['file_path']
             )
 
@@ -573,6 +633,18 @@ class RebuildGenomicTableRecordsApi(BaseGenomicTaskApi):
             ],
             'user_event_metrics': [
                 genomic_user_event_metrics_batch_update
+            ],
+            'genomic_cvl_result_past_due': [
+                genomic_cvl_result_past_due_batch_update
+            ],
+            'genomic_member_report_state': [
+                genomic_member_report_state_batch_update
+            ],
+            'genomic_result_viewed': [
+                genomic_result_viewed_batch_update
+            ],
+            'genomic_appointment_event': [
+                genomic_appointment_event_batch_update
             ]
         }
 
@@ -582,7 +654,7 @@ class RebuildGenomicTableRecordsApi(BaseGenomicTaskApi):
             logging.info('Rebuild complete.')
 
             # Publish PDR data-pipeline pub-sub event.
-            publish_pdr_pubsub(table, action='upsert', pk_column='id', ids=batch)
+            publish_pdr_pubsub(table, action='upsert', pk_columns=['id'], pk_values=batch)
             logging.info('PubSub notification sent.')
 
             self.create_cloud_record()
@@ -625,3 +697,24 @@ class GenomicSetMemberUpdateApi(BaseGenomicTaskApi):
         logging.info('Complete.')
         return {"success": True}
 
+
+class GenomicGCMetricsUpsertApi(BaseGenomicTaskApi):
+    """
+    Cloud task endpoint: Upserts Genomic GC validation metric records
+    """
+    def post(self):
+        super().post()
+        metric_id = self.data.get('metric_id')
+        payload_dict = self.data.get('payload_dict')
+
+        if not payload_dict:
+            logging.warning('Payload_dict is required for upserting gc metrics.')
+            return {"success": False}
+
+        self.metrics_dao.upsert_gc_validation_metrics_from_dict(
+            data_to_upsert=payload_dict,
+            existing_id=metric_id
+        )
+
+        logging.info('Complete.')
+        return {"success": True}

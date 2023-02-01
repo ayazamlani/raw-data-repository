@@ -1,4 +1,3 @@
-from collections import defaultdict
 import json
 import logging
 import os
@@ -10,17 +9,16 @@ from hashlib import md5
 import pytz
 from typing import Dict, List, Optional
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import aliased, joinedload, Session, subqueryload
 from werkzeug.exceptions import BadRequest
 
 from rdr_service import singletons
 from rdr_service.api_util import dispatch_task
 from rdr_service.dao.database_utils import format_datetime, parse_datetime
-from rdr_service.domain_model import response as response_domain_model
 from rdr_service.lib_fhir.fhirclient_1_0_6.models import questionnaireresponse as fhir_questionnaireresponse
-from rdr_service.participant_enums import QuestionnaireResponseStatus, PARTICIPANT_COHORT_2_START_TIME,\
-    PARTICIPANT_COHORT_3_START_TIME
+from rdr_service.participant_enums import QuestionnaireResponseStatus, PARTICIPANT_COHORT_2_START_TIME, \
+    PARTICIPANT_COHORT_3_START_TIME, Race, get_all_races_from_codes
 from rdr_service.app_util import get_account_origin_id, is_self_request
 from rdr_service import storage
 from rdr_service import clock, code_constants, config
@@ -75,7 +73,17 @@ from rdr_service.code_constants import (
     BASICS_PROFILE_UPDATE_QUESTION_CODES,
     REMOTE_PM_MODULE,
     REMOTE_PM_UNIT,
-    MEASUREMENT_SYS
+    MEASUREMENT_SYS,
+    VA_PRIMARY_RECONSENT_C1_C2_QUESTION,
+    VA_PRIMARY_RECONSENT_C3_QUESTION,
+    VA_EHR_RECONSENT,
+    NON_VA_PRIMARY_RECONSENT_QUESTION,
+    VA_EHR_RECONSENT_QUESTION_CODE,
+    AGREE_YES,
+    AGREE_NO,
+    REMOTE_ID_VERIFIED_CODE,
+    REMOTE_ID_VERIFIED_ON_CODE,
+    ETM_CONSENT_QUESTION_CODE
 )
 from rdr_service.dao.base_dao import BaseDao
 from rdr_service.dao.code_dao import CodeDao
@@ -93,7 +101,6 @@ from rdr_service.field_mappings import FieldType, QUESTIONNAIRE_MODULE_CODE_TO_F
     QUESTIONNAIRE_ON_DIGITAL_HEALTH_SHARING_FIELD
 from rdr_service.model.code import Code, CodeType
 from rdr_service.model.consent_response import ConsentResponse, ConsentType
-from rdr_service.model.participant import Participant
 from rdr_service.model.measurements import PhysicalMeasurements, Measurement
 from rdr_service.model.questionnaire import QuestionnaireConcept, QuestionnaireHistory, QuestionnaireQuestion
 from rdr_service.model.questionnaire_response import QuestionnaireResponse, QuestionnaireResponseAnswer,\
@@ -480,16 +487,9 @@ class QuestionnaireResponseDao(BaseDao):
         elif questionnaire_response.status == QuestionnaireResponseStatus.IN_PROGRESS:
             questionnaire_response.classificationType = QuestionnaireResponseClassificationType.PARTIAL
 
-        # IMPORTANT: update the participant summary first to grab an exclusive lock on the participant
-        # row. If you instead do this after the insert of the questionnaire response, MySQL will get a
-        # shared lock on the participant row due the foreign key, and potentially deadlock later trying
-        # to get the exclusive lock if another thread is updating the participant. See DA-269.
-        # (We need to lock both participant and participant summary because the summary row may not
-        # exist yet.)
-        #
         # TODO:  If we later classify ConsentPII payloads that contain updates to participant's own profile data
-        # (name, address, email, etc.) as PROFILE_UPDATE (vs. only classifying secondary contact profile updates via
-        # TheBasics), then this check must allow those ConsentPII responses trigger _update_participant_summary()
+        #  (name, address, email, etc.) as PROFILE_UPDATE (vs. only classifying secondary contact profile updates via
+        #  TheBasics), then this check must allow those ConsentPII responses trigger _update_participant_summary()
         if (questionnaire_response.status == QuestionnaireResponseStatus.COMPLETED and
                questionnaire_response.classificationType == QuestionnaireResponseClassificationType.COMPLETE):
             with self.session() as new_session:
@@ -508,6 +508,9 @@ class QuestionnaireResponseDao(BaseDao):
         for answer in current_answers:
             answer.endTime = questionnaire_response.created
             session.merge(answer)
+
+        summary = ParticipantSummaryDao().get_for_update(session, questionnaire_response.participantId)
+        ParticipantSummaryDao().update_enrollment_status(summary, session=session)
 
         return questionnaire_response
 
@@ -579,7 +582,6 @@ class QuestionnaireResponseDao(BaseDao):
 
         participant_id = questionnaire_response.participantId
         authored = questionnaire_response.authored.replace(tzinfo=None)
-        measurements = []
         pm_dao = PhysicalMeasurementsDao()
         exist_pm = pm_dao.get_exist_remote_pm(participant_id, authored)
         if exist_pm:
@@ -613,49 +615,55 @@ class QuestionnaireResponseDao(BaseDao):
                         else:
                             raise BadRequest(f'unknown measurement unit {answer_code_value} for participant '
                                              f'{participant_id}')
-                    elif question_code.value in ['self_reported_height_ft', 'self_reported_height_in',
-                                                 'self_reported_height_cm'] and answer.valueInteger:
+                    elif (
+                        question_code.value in['self_reported_height_ft', 'self_reported_height_in',
+                                               'self_reported_height_cm']
+                        and answer.valueInteger is not None
+                    ):
                         self_reported_int_value_map[question_code.value] = round(answer.valueInteger, 1)
-                    elif question_code.value in ['self_reported_weight_pounds',
-                                                 'self_reported_weight_kg'] and answer.valueString:
+                    elif (
+                        question_code.value in ['self_reported_weight_pounds', 'self_reported_weight_kg']
+                        and answer.valueString is not None
+                    ):
                         self_reported_int_value_map[question_code.value] = round(float(answer.valueString), 1)
 
         if origin_measurement_unit == OriginMeasurementUnit.IMPERIAL:
-            # validation
-            if self_reported_int_value_map['self_reported_height_ft'] is None or \
-                self_reported_int_value_map['self_reported_height_in'] is None or \
-                self_reported_int_value_map['self_reported_weight_pounds'] is None:
-                raise BadRequest(f'invalid physical measurement value for participant {participant_id}')
             # convert to METRIC
-            height_cm_decimal = round(self_reported_int_value_map['self_reported_height_ft'] * 30.48
-                                      + self_reported_int_value_map['self_reported_height_in'] * 2.54, 1)
-            weight_kg_decimal = round(self_reported_int_value_map['self_reported_weight_pounds'] * 0.453592, 1)
-            self_reported_int_value_map['self_reported_height_cm'] = height_cm_decimal
-            self_reported_int_value_map['self_reported_weight_kg'] = weight_kg_decimal
-        elif origin_measurement_unit == OriginMeasurementUnit.METRIC:
-            # validation
-            if self_reported_int_value_map['self_reported_height_cm'] is None or \
-                self_reported_int_value_map['self_reported_weight_kg'] is None:
-                raise BadRequest(f'invalid physical measurement value for participant {participant_id}')
+            height_ft = self_reported_int_value_map.get('self_reported_height_ft')
+            height_in = self_reported_int_value_map.get('self_reported_height_in')
+            height_cm_decimal = None
+            if not (height_ft is None or height_in is None):
+                height_cm_decimal = round((height_ft * 30.48) + (height_in * 2.54), 1)
 
-        pm_height = Measurement(
-            codeSystem=MEASUREMENT_SYS,
-            codeValue='height',
-            measurementTime=authored,
-            valueDecimal=self_reported_int_value_map['self_reported_height_cm'],
-            valueUnit='cm',
-        )
+            weight_pounds = self_reported_int_value_map.get('self_reported_weight_pounds')
+            weight_kg_decimal = None
+            if weight_pounds is not None:
+                weight_kg_decimal = round(weight_pounds * 0.453592, 1)
+        else:
+            height_cm_decimal = self_reported_int_value_map.get('self_reported_height_cm')
+            weight_kg_decimal = self_reported_int_value_map.get('self_reported_weight_kg')
 
-        pm_weight = Measurement(
-            codeSystem=MEASUREMENT_SYS,
-            codeValue='weight',
-            measurementTime=authored,
-            valueDecimal=self_reported_int_value_map['self_reported_weight_kg'],
-            valueUnit='kg',
-        )
-
-        measurements.append(pm_height)
-        measurements.append(pm_weight)
+        measurements = []
+        if height_cm_decimal is not None:
+            measurements.append(
+                Measurement(
+                    codeSystem=MEASUREMENT_SYS,
+                    codeValue='height',
+                    measurementTime=authored,
+                    valueDecimal=height_cm_decimal,
+                    valueUnit='cm',
+                )
+            )
+        if weight_kg_decimal is not None:
+            measurements.append(
+                Measurement(
+                    codeSystem=MEASUREMENT_SYS,
+                    codeValue='weight',
+                    measurementTime=authored,
+                    valueDecimal=weight_kg_decimal,
+                    valueUnit='kg',
+                )
+            )
 
         pm = PhysicalMeasurements(
             participantId=participant_id,
@@ -719,7 +727,6 @@ class QuestionnaireResponseDao(BaseDao):
 
         # Fetch the codes for all questions and concepts
         codes = code_dao.get_with_ids(code_ids)
-
         code_map = {code.codeId: code for code in codes if code.system == PPI_SYSTEM}
         question_map = {question.questionnaireQuestionId: question for question in questions}
         race_code_ids = []
@@ -729,6 +736,8 @@ class QuestionnaireResponseDao(BaseDao):
         dvehr_consent = QuestionnaireStatus.SUBMITTED_NO_CONSENT
         street_address_submitted = False
         street_address2_submitted = False
+        rejected_reconsent = False
+        remote_id_info = {}
 
         # Skip updating the summary if the response being stored has an authored
         # date earlier than one that's already been recorded
@@ -781,7 +790,6 @@ class QuestionnaireResponseDao(BaseDao):
                             )
                     elif code.value == RACE_QUESTION_CODE:
                         race_code_ids.append(answer.valueCodeId)
-
                     elif code.value == DVEHR_SHARING_QUESTION_CODE:
                         code = code_dao.get(answer.valueCodeId)
                         if code and code.value == DVEHRSHARING_CONSENT_CODE_YES:
@@ -866,6 +874,40 @@ class QuestionnaireResponseDao(BaseDao):
                         answer_value = code_dao.get(answer.valueCodeId).value
                         if answer_value.lower() == WEAR_YES_ANSWER_CODE:
                             self.consents_provided.append(ConsentType.WEAR)
+                    elif self._code_in_list(
+                        code.value,
+                        [
+                            VA_PRIMARY_RECONSENT_C1_C2_QUESTION,
+                            VA_PRIMARY_RECONSENT_C3_QUESTION,
+                            NON_VA_PRIMARY_RECONSENT_QUESTION
+                        ]
+                    ):
+                        answer_value = code_dao.get(answer.valueCodeId).value
+                        if answer_value.lower() == AGREE_YES:
+                            self.consents_provided.append(ConsentType.PRIMARY_RECONSENT)
+                            participant_summary.reconsentForStudyEnrollmentAuthored = authored
+                    elif code.value.lower() == VA_EHR_RECONSENT_QUESTION_CODE:
+                        answer_value = code_dao.get(answer.valueCodeId).value
+                        if answer_value.lower() == AGREE_NO:
+                            rejected_reconsent = module_changed = something_changed = True
+                            participant_summary.consentForElectronicHealthRecords = \
+                                QuestionnaireStatus.SUBMITTED_NO_CONSENT
+                            participant_summary.consentForElectronicHealthRecordsAuthored = authored
+                            participant_summary.consentForElectronicHealthRecordsTime = questionnaire_response.created
+                    elif code.value.lower() == REMOTE_ID_VERIFIED_ON_CODE:
+                        remote_id_info['verified_on'] = int(answer.valueString)/1000
+                    elif code.value.lower() == REMOTE_ID_VERIFIED_CODE:
+                        remote_id_info['verified'] = answer.valueString
+                    elif code.value.lower() == ETM_CONSENT_QUESTION_CODE:
+                        answer_value = code_dao.get(answer.valueCodeId).value
+                        if answer_value.lower() == AGREE_YES:
+                            self.consents_provided.append(ConsentType.ETM)
+                            participant_summary.consentForEtM = QuestionnaireStatus.SUBMITTED
+                        elif answer_value.lower() == AGREE_NO:
+                            participant_summary.consentForEtM = QuestionnaireStatus.SUBMITTED_NO_CONSENT
+
+                        participant_summary.consentForEtMTime = questionnaire_response.created
+                        participant_summary.consentForEtMAuthored = authored
 
         # If the answer for line 2 of the street address was left out then it needs to be clear on summary.
         # So when it hasn't been submitted and there is something set for streetAddress2 we want to clear it out.
@@ -882,6 +924,10 @@ class QuestionnaireResponseDao(BaseDao):
             if race != participant_summary.race:
                 participant_summary.race = race
                 something_changed = True
+            if not participant_summary.aian \
+                    and Race.AMERICAN_INDIAN_OR_ALASKA_NATIVE in get_all_races_from_codes(race_codes):
+                participant_summary.aian = True
+                something_changed = True
 
         if gender_code_ids:
             gender_codes = [code_dao.get(code_id) for code_id in gender_code_ids]
@@ -891,6 +937,17 @@ class QuestionnaireResponseDao(BaseDao):
                 something_changed = True
 
         dna_program_consent_update_code = config.getSettingJson(config.DNA_PROGRAM_CONSENT_UPDATE_CODE, None)
+
+        if 'verified' in remote_id_info and 'verified_on' in remote_id_info:
+            if remote_id_info['verified'] == "true":
+                participant_summary.remoteIdVerificationOrigin = participant_summary.participantOrigin
+                participant_summary.remoteIdVerificationStatus = True
+                participant_summary.remoteIdVerifiedOn = datetime.utcfromtimestamp(remote_id_info['verified_on'])
+        if 'verified' in remote_id_info:
+            if remote_id_info['verified'] == "false":
+                participant_summary.remoteIdVerificationOrigin = participant_summary.participantOrigin
+                participant_summary.remoteIdVerificationStatus = False
+                participant_summary.remoteIdVerifiedOn = None
 
         # Set summary fields to SUBMITTED for questionnaire concepts that are found in
         # QUESTIONNAIRE_MODULE_CODE_TO_FIELD
@@ -1000,6 +1057,9 @@ class QuestionnaireResponseDao(BaseDao):
                         setattr(participant_summary, mod_submitted, QuestionnaireStatus.SUBMITTED)
                         setattr(participant_summary, mod_authored, authored)
                         module_changed = True
+                elif self._code_in_list(code.value, [VA_EHR_RECONSENT]) and not rejected_reconsent:
+                    self.consents_provided.append(ConsentType.EHR_RECONSENT)
+                    participant_summary.reconsentForElectronicHealthRecordsAuthored = authored
 
         if module_changed:
             participant_summary.numCompletedBaselinePPIModules = count_completed_baseline_ppi_modules(
@@ -1024,7 +1084,6 @@ class QuestionnaireResponseDao(BaseDao):
                         .format(*["present" if part else "missing" for part in email_phone])
                 )
 
-            ParticipantSummaryDao().update_enrollment_status(participant_summary)
             participant_summary.lastModified = clock.CLOCK.now()
             session.merge(participant_summary)
 
@@ -1426,134 +1485,7 @@ class QuestionnaireResponseDao(BaseDao):
         return [result_row.participantId for result_row in query.all()]
 
     @classmethod
-    def get_responses_to_surveys(
-        cls,
-        session: Session,
-        survey_codes: List[str] = None,
-        participant_ids: List[int] = None,
-        include_ignored_answers=False,
-        sent_statuses: Optional[List[QuestionnaireResponseStatus]] = None,
-        classification_types: Optional[List[QuestionnaireResponseClassificationType]] = None,
-        created_start_datetime: datetime = None,
-        created_end_datetime: datetime = None
-    ) -> Dict[int, response_domain_model.ParticipantResponses]:
-        """
-        Retrieve questionnaire response data (returned as a domain model) for the specified participant ids
-        and survey codes.
-
-        :param survey_codes: Survey module code strings to get responses for
-        :param session: Session to use for connecting to the database
-        :param participant_ids: Participant ids to get responses for
-        :param include_ignored_answers: Include response answers that have been ignored
-        :param sent_statuses: List of QuestionnaireResponseStatus to use when filtering responses
-            (defaults to QuestionnaireResponseStatus.COMPLETED)
-        :param classification_types: List of QuestionnaireResponseClassificationTypes to filter results by
-        :param created_start_datetime: Optional start date, if set only responses that were sent to
-            the API after this date will be returned
-        :param created_end_datetime: Optional end date, if set only responses that were sent to the
-            API before this date will be returned
-        :return: A dictionary keyed by participant ids with the value being the collection of responses for
-            that participant
-        """
-
-        if sent_statuses is None:
-            sent_statuses = [QuestionnaireResponseStatus.COMPLETED]
-        if classification_types is None:
-            classification_types = [QuestionnaireResponseClassificationType.COMPLETE]
-
-        # Build query for all the questions answered by the given participants for the given survey codes
-        question_code = aliased(Code)
-        survey_code = aliased(Code)
-        query = (
-            session.query(
-                func.lower(question_code.value),
-                QuestionnaireResponse.participantId,
-                QuestionnaireResponse.questionnaireResponseId,
-                QuestionnaireResponse.authored,
-                survey_code.value,
-                QuestionnaireResponseAnswer,
-                QuestionnaireResponse.status
-            )
-            .select_from(QuestionnaireResponseAnswer)
-            .join(QuestionnaireQuestion)
-            .join(QuestionnaireResponse)
-            .join(
-                Participant,
-                Participant.participantId == QuestionnaireResponse.participantId
-            )
-            .join(question_code, question_code.codeId == QuestionnaireQuestion.codeId)
-            .join(
-                QuestionnaireConcept,
-                and_(
-                    QuestionnaireConcept.questionnaireId == QuestionnaireResponse.questionnaireId,
-                    QuestionnaireConcept.questionnaireVersion == QuestionnaireResponse.questionnaireVersion
-                )
-            ).join(survey_code, survey_code.codeId == QuestionnaireConcept.codeId)
-            .options(joinedload(QuestionnaireResponseAnswer.code))
-            .filter(
-                QuestionnaireResponse.status.in_(sent_statuses),
-                QuestionnaireResponse.classificationType.in_(classification_types),
-                Participant.isTestParticipant != 1
-            )
-        )
-
-        if survey_codes:
-            query = query.filter(
-                survey_code.value.in_(survey_codes)
-            )
-        if participant_ids:
-            query = query.filter(
-                QuestionnaireResponse.participantId.in_(participant_ids)
-            )
-        if not include_ignored_answers:
-            query = query.filter(
-                or_(
-                    QuestionnaireResponseAnswer.ignore.is_(False),
-                    QuestionnaireResponseAnswer.ignore.is_(None)
-                )
-            )
-        if created_start_datetime:
-            query = query.filter(
-                QuestionnaireResponse.created >= created_start_datetime
-            ).with_hint(
-                QuestionnaireResponse,
-                'USE INDEX (idx_created_q_id)'
-            )
-        if created_end_datetime:
-            query = query.filter(
-                QuestionnaireResponse.created <= created_end_datetime
-            ).with_hint(
-                QuestionnaireResponse,
-                'USE INDEX (idx_created_q_id)'
-            )
-
-        # build dict with participant ids as keys and ParticipantResponse objects as values
-        participant_response_map = defaultdict(response_domain_model.ParticipantResponses)
-        for question_code_str, participant_id, response_id, authored_datetime, survey_code_str, answer, \
-                status in query.all():
-            # Get the collection of responses for the participant
-            response_collection_for_participant = participant_response_map[participant_id]
-
-            # Get the response that this particular answer is for so we can store the answer
-            response = response_collection_for_participant.responses.get(response_id)
-            if not response:
-                # This is the first time seeing an answer for this response, so create the Response structure for it
-                response = response_domain_model.Response(
-                    id=response_id,
-                    survey_code=survey_code_str,
-                    authored_datetime=authored_datetime,
-                    status=status
-                )
-                response_collection_for_participant.responses[response_id] = response
-
-            response.answered_codes[question_code_str].append(
-                response_domain_model.Answer.from_db_model(answer)
-            )
-
-        return dict(participant_response_map)
-
-    @classmethod
-    def get_latest_answer_for_state_receiving_care(cls, session: Session, participant_id) -> str:
+    def get_latest_answer_to_question(cls, session: Session, participant_id, question_code_value) -> str:
         answer_code = aliased(Code)
         question_code = aliased(Code)
         query = (
@@ -1565,18 +1497,38 @@ class QuestionnaireResponseDao(BaseDao):
                 question_code,
                 and_(
                     question_code.codeId == QuestionnaireQuestion.codeId,
-                    question_code.value == code_constants.RECEIVE_CARE_STATE
+                    question_code.value == question_code_value
                 )
-            )
-            .join(
+            ).join(
                 answer_code,
                 answer_code.codeId == QuestionnaireResponseAnswer.valueCodeId
             )
             .order_by(QuestionnaireResponse.authored.desc())
             .filter(QuestionnaireResponse.participantId == participant_id)
+            .limit(1)
         )
 
         return query.scalar()
+
+    @classmethod
+    def get_latest_answer_for_state_of_residence(cls, session: Session, participant_id) -> str:
+        return cls.get_latest_answer_to_question(
+            session=session,
+            participant_id=participant_id,
+            question_code_value=code_constants.STATE_QUESTION_CODE
+        )
+
+    @classmethod
+    def get_latest_answer_for_state_receiving_care(cls, session: Session, participant_id) -> str:
+        return cls.get_latest_answer_to_question(
+            session=session,
+            participant_id=participant_id,
+            question_code_value=code_constants.RECEIVE_CARE_STATE
+        )
+
+    @classmethod
+    def _code_in_list(cls, code_value: str, code_list: List[str]):
+        return code_value.lower in [list_value.lower() for list_value in code_list]
 
 
 def _validate_consent_pdfs(resource):

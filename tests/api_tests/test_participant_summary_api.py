@@ -10,7 +10,7 @@ from mock import patch
 from urllib.parse import urlencode
 
 from rdr_service import config, main
-from rdr_service.api_util import PTC, CURATION, HEALTHPRO
+from rdr_service.api_util import PTC, CURATION, HEALTHPRO, SUPPORT
 from rdr_service.clock import FakeClock
 from rdr_service.code_constants import (CONSENT_PERMISSION_NO_CODE, CONSENT_PERMISSION_YES_CODE,
                                         DVEHRSHARING_CONSENT_CODE_NO, DVEHRSHARING_CONSENT_CODE_NOT_SURE,
@@ -19,17 +19,22 @@ from rdr_service.code_constants import (CONSENT_PERMISSION_NO_CODE, CONSENT_PERM
                                         RACE_NONE_OF_THESE_CODE, RACE_WHITE_CODE, UNSET)
 from rdr_service.concepts import Concept
 from rdr_service.dao.biobank_stored_sample_dao import BiobankStoredSampleDao
+from rdr_service.dao.code_dao import CodeDao
 from rdr_service.dao.hpo_dao import HPODao
 from rdr_service.dao.participant_summary_dao import ParticipantSummaryDao
 from rdr_service.dao.site_dao import SiteDao
 from rdr_service.model.biobank_stored_sample import BiobankStoredSample
 from rdr_service.model.code import CodeType
+from rdr_service.model.config_utils import from_client_biobank_id
 from rdr_service.model.consent_file import ConsentType
+from rdr_service.model.enrollment_status_history import EnrollmentStatusHistory
 from rdr_service.model.hpo import HPO
+from rdr_service.model.utils import from_client_participant_id
 from rdr_service.participant_enums import (
     ANSWER_CODE_TO_GENDER, ANSWER_CODE_TO_RACE, OrganizationType,
     TEST_HPO_ID, TEST_HPO_NAME, QuestionnaireStatus, EhrStatus)
-from tests.test_data import load_biobank_order_json, load_measurement_json, to_client_participant_id
+from tests.test_data import load_biobank_order_json, load_measurement_json, to_client_participant_id,\
+    load_qr_response_json
 from tests.helpers.unittest_base import BaseTestCase
 
 TIME_1 = datetime.datetime(2016, 1, 1)
@@ -55,16 +60,24 @@ participant_summary_default_values = {
     "state": "UNSET",
     "recontactMethod": "UNSET",
     "enrollmentStatus": "INTERESTED",
+    "enrollmentStatusV3_0": "PARTICIPANT",
+    "enrollmentStatusV3_1": "PARTICIPANT",
     "samplesToIsolateDNA": "UNSET",
     "numBaselineSamplesArrived": 0,
     "numCompletedPPIModules": 1,
     "numCompletedBaselinePPIModules": 1,
+    "clinicPhysicalMeasurementsStatus": "UNSET",
+    "selfReportedPhysicalMeasurementsStatus": "UNSET",
     "physicalMeasurementsStatus": "UNSET",
+    "physicalMeasurementsCollectType": "UNSET",
+    "physicalMeasurementsCreatedSite": "UNSET",
+    "physicalMeasurementsFinalizedSite": "UNSET",
     "consentForGenomicsROR": "UNSET",
     "consentForDvElectronicHealthRecordsSharing": "UNSET",
     "consentForElectronicHealthRecords": "UNSET",
     "consentForStudyEnrollment": "SUBMITTED",
     "consentForCABoR": "UNSET",
+    "consentForEtM": "UNSET",
     "questionnaireOnFamilyHealth": "UNSET",
     "questionnaireOnHealthcareAccess": "UNSET",
     "questionnaireOnMedicalHistory": "UNSET",
@@ -85,8 +98,8 @@ participant_summary_default_values = {
     "biospecimenFinalizedSite": "UNSET",
     "biospecimenProcessedSite": "UNSET",
     "biospecimenSourceSite": "UNSET",
-    "physicalMeasurementsCreatedSite": "UNSET",
-    "physicalMeasurementsFinalizedSite": "UNSET",
+    "clinicPhysicalMeasurementsCreatedSite": "UNSET",
+    "clinicPhysicalMeasurementsFinalizedSite": "UNSET",
     "biospecimenStatus": "UNSET",
     "sampleOrderStatus1ED04": "UNSET",
     "sampleOrderStatus1ED10": "UNSET",
@@ -129,6 +142,7 @@ participant_summary_default_values = {
     "suspensionStatus": "NOT_SUSPENDED",
     "numberDistinctVisits": 0,
     "ehrStatus": "UNSET",
+    "healthDataStreamSharingStatusV3_1": "NEVER_SHARED",
     "ehrConsentExpireStatus": "UNSET",
     "patientStatus": [],
     "participantOrigin": 'example',
@@ -140,11 +154,15 @@ participant_summary_default_values = {
     "sample1SAL2CollectionMethod": "UNSET",
     "isEhrDataAvailable": False,
     "wasEhrDataAvailable": False,
+    "wasParticipantMediatedEhrAvailable": False,
     "questionnaireOnCopeVaccineMinute1": "UNSET",
     "questionnaireOnCopeVaccineMinute2": "UNSET",
     "questionnaireOnCopeVaccineMinute3": "UNSET",
     "questionnaireOnCopeVaccineMinute4": "UNSET",
-    "physicalMeasurementsCollectType": "UNSET",
+    "onsiteIdVerificationType": "UNSET",
+    "onsiteIdVerificationVisitType": "UNSET",
+    "questionnaireOnLifeFunctioning": "UNSET",
+    "aian": False
 }
 
 participant_summary_default_values_no_basics = dict(participant_summary_default_values)
@@ -310,11 +328,13 @@ class ParticipantSummaryApiTest(BaseTestCase):
                 "consentForStudyEnrollmentTime": TIME_1.isoformat(),
                 "consentForStudyEnrollmentAuthored": TIME_1.isoformat(),
                 "consentForStudyEnrollmentFirstYesAuthored": TIME_1.isoformat(),
-                "ageRange": "36-45",
+                "ageRange": "35-44",
                 "email": self.email,
                 "consentCohort": "COHORT_1",
                 "cohort2PilotFlag": "UNSET",
-                "patientStatus": patient_statuses or []
+                "patientStatus": patient_statuses or [],
+                "enrollmentStatusParticipantV3_0Time": "2016-01-01T00:00:00",
+                "enrollmentStatusParticipantV3_1Time": "2016-01-01T00:00:00",
             }
         )
 
@@ -659,7 +679,8 @@ class ParticipantSummaryApiTest(BaseTestCase):
             ConsentType.PRIMARY: 'consentForStudyEnrollment',
             ConsentType.CABOR: 'consentForCABoR',
             ConsentType.EHR: 'consentForElectronicHealthRecords',
-            ConsentType.GROR: 'consentForGenomicsROR'
+            ConsentType.GROR: 'consentForGenomicsROR',
+            ConsentType.PRIMARY_RECONSENT: 'reconsentForStudyEnrollment'
         }
 
         for num in range(num_summary):
@@ -856,6 +877,38 @@ class ParticipantSummaryApiTest(BaseTestCase):
 
         self.assertEqual(len(entries), len(current_summaries))
         self.assertTrue(all(obj.get('participantIncentives') is not None for obj in resources))
+
+    def test_get_aian_flag(self):
+        for num in range(3):
+            self.data_generator.create_database_participant_summary(
+                firstName=f"Testy_{num}",
+                lastName=f"Tester_{num}",
+                dateOfBirth=datetime.date(1978, 10, 9),
+                aian=1 if num < 2 else 0
+            )
+
+        current_summaries = self.ps_dao.get_all()
+        first_pid = current_summaries[0].participantId
+        second_pid = current_summaries[1].participantId
+        third_pid = current_summaries[2].participantId
+
+        first_summary = self.send_get(f"Participant/P{first_pid}/Summary")
+        self.assertIsNotNone(first_summary.get('aian'))
+        self.assertEqual(first_summary.get('aian'), True)
+
+        second_summary = self.send_get(f"Participant/P{second_pid}/Summary")
+        self.assertIsNotNone(second_summary.get('aian'))
+        self.assertEqual(second_summary.get('aian'), True)
+
+        third_summary = self.send_get(f"Participant/P{third_pid}/Summary")
+        self.assertIsNotNone(third_summary.get('aian'))
+        self.assertEqual(third_summary.get('aian'), False)
+
+        response = self.send_get(f"ParticipantSummary?_sort=lastModified")
+        entries = response['entry']
+        resources = [obj.get('resource') for obj in entries]
+
+        self.assertTrue(all(obj.get('aian') in (True, False) for obj in resources))
 
     def test_pairing_summary(self):
         participant = self.send_post("Participant", {"providerLink": [self.provider_link]})
@@ -1704,6 +1757,8 @@ class ParticipantSummaryApiTest(BaseTestCase):
             "income": "lotsofmoney",
             "dateOfBirth": datetime.date(1978, 10, 9),
             "CABoRSignature": "signature.pdf",
+            "enrollmentStatusParticipantV3_0Time": "2016-01-01T00:00:00",
+            "enrollmentStatusParticipantV3_1Time": "2016-01-01T00:00:00"
         }
 
         self.post_demographics_questionnaire(participant_id, questionnaire_id, **answers)
@@ -1817,7 +1872,7 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self.send_consent(participant_id_1, authored=datetime.datetime(2015, 11, 8))
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
         self.assertEqual("UNSET", ps_1["consentForElectronicHealthRecords"])
-        self.assertEqual(None, ps_1.get("enrollmentStatusMemberTime"))
+        self.assertEqual(None, ps_1.get("enrollmentStatusParticipantPlusEhrV3_1Time"))
 
         self._submit_consent_questionnaire_response(
             participant_id_1, questionnaire_id, "NOPE",
@@ -1825,7 +1880,7 @@ class ParticipantSummaryApiTest(BaseTestCase):
         )
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
         self.assertEqual("SUBMITTED_NO_CONSENT", ps_1["consentForElectronicHealthRecords"])
-        self.assertEqual(None, ps_1.get("enrollmentStatusMemberTime"))
+        self.assertEqual(None, ps_1.get("enrollmentStatusParticipantPlusEhrV3_1Time"))
 
         # DA-2732:  Make sure the test assigns a more recent timestamp for the YES response.  An identical authored
         # time for both YES/NO responses will not guarantee the consent status changes
@@ -1834,7 +1889,7 @@ class ParticipantSummaryApiTest(BaseTestCase):
         )
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
         self.assertEqual("SUBMITTED", ps_1["consentForElectronicHealthRecords"])
-        self.assertEqual(TIME_2.isoformat(), ps_1.get("enrollmentStatusMemberTime"))
+        self.assertEqual(TIME_2.isoformat(), ps_1.get("enrollmentStatusParticipantPlusEhrV3_1Time"))
 
     def _submit_dvehr_consent_questionnaire_response(
         self, participant_id, questionnaire_id, dvehr_consent_answer, time=TIME_1, authored=None
@@ -1926,13 +1981,13 @@ class ParticipantSummaryApiTest(BaseTestCase):
         with FakeClock(TIME_6):
             self.send_consent(participant_id_1)
 
-        # submit dv consent only, the enrollmentStatusMemberTime should be TIME_1
+        # submit dv consent only, the enrollmentStatusParticipantPlusEhrV3_1Time should be TIME_1
         self._submit_dvehr_consent_questionnaire_response(
             participant_id_1, questionnaire_id_1, DVEHRSHARING_CONSENT_CODE_YES, time=TIME_1
         )
 
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
-        self.assertEqual(TIME_1.isoformat(), ps_1.get("enrollmentStatusMemberTime"))
+        self.assertEqual(TIME_1.isoformat(), ps_1.get("enrollmentStatusParticipantPlusEhrV3_1Time"))
         self.assertEqual("SUBMITTED", ps_1["consentForDvElectronicHealthRecordsSharing"])
         self.assertEqual(TIME_1.isoformat(), ps_1["consentForDvElectronicHealthRecordsSharingTime"])
 
@@ -1942,8 +1997,8 @@ class ParticipantSummaryApiTest(BaseTestCase):
         )
 
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
-        # the enrollmentStatusMemberTime should still be TIME_1
-        self.assertEqual(TIME_1.isoformat(), ps_1.get("enrollmentStatusMemberTime"))
+        # the enrollmentStatusParticipantPlusEhrV3_1Time should still be TIME_1
+        self.assertEqual(TIME_1.isoformat(), ps_1.get("enrollmentStatusParticipantPlusEhrV3_1Time"))
 
     def test_dv_consent_after_ehr_consent(self):
         questionnaire_id_1 = self.create_questionnaire("dv_ehr_share_consent_questionnaire.json")
@@ -1960,8 +2015,8 @@ class ParticipantSummaryApiTest(BaseTestCase):
         )
 
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
-        # the enrollmentStatusMemberTime should still be TIME_1
-        self.assertEqual(TIME_1.isoformat(), ps_1.get("enrollmentStatusMemberTime"))
+        # the enrollmentStatusParticipantPlusEhrV3_1Time should still be TIME_1
+        self.assertEqual(TIME_1.isoformat(), ps_1.get("enrollmentStatusParticipantPlusEhrV3_1Time"))
 
         # submit dv consent after ehr consent at TIME_2
         self._submit_dvehr_consent_questionnaire_response(
@@ -1969,8 +2024,8 @@ class ParticipantSummaryApiTest(BaseTestCase):
         )
 
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
-        # the enrollmentStatusMemberTime should still be TIME_1
-        self.assertEqual(TIME_1.isoformat(), ps_1.get("enrollmentStatusMemberTime"))
+        # the enrollmentStatusParticipantPlusEhrV3_1Time should still be TIME_1
+        self.assertEqual(TIME_1.isoformat(), ps_1.get("enrollmentStatusParticipantPlusEhrV3_1Time"))
 
     def test_dv_consent_withdraw_ehr_consent(self):
         questionnaire_id_1 = self.create_questionnaire("dv_ehr_share_consent_questionnaire.json")
@@ -1995,10 +2050,33 @@ class ParticipantSummaryApiTest(BaseTestCase):
         )
 
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
-        # ehr consent overwrite dv consent, enrollmentStatusMemberTime should be None
-        self.assertIsNone(ps_1.get("enrollmentStatusMemberTime"))
-        self.assertEqual("INTERESTED", ps_1.get("enrollmentStatus"))
+        # Participants that attain MEMBER status shouldn't lose the enrollment status
+        self.assertEqual(TIME_1.isoformat(), ps_1.get("enrollmentStatusMemberTime"))
+        self.assertEqual("MEMBER", ps_1.get("enrollmentStatus"))
         self.assertEqual("SUBMITTED_NO_CONSENT", ps_1.get("consentForElectronicHealthRecords"))
+
+    def test_enrollment_status_history(self):
+        primary_consent_datetime = datetime.datetime(2022, 3, 17)
+        ehr_consent_datetime = datetime.datetime(2022, 4, 1)
+
+        # Create a participant and submit primary consent for them
+        participant_response = self.send_post("Participant", {})
+        participant_id_str = participant_response["participantId"]
+        with FakeClock(primary_consent_datetime):
+            self.send_consent(participant_id_str)
+
+        # Send EHR consent, upgrading them from INTERESTED to MEMBER
+        ehr_questionnaire_id = self.create_questionnaire("ehr_consent_questionnaire.json")
+        self._submit_consent_questionnaire_response(
+            participant_id_str, ehr_questionnaire_id, CONSENT_PERMISSION_YES_CODE, time=ehr_consent_datetime
+        )
+
+        status_history = self.session.query(EnrollmentStatusHistory).filter(
+            EnrollmentStatusHistory.participant_id == from_client_participant_id(participant_id_str),
+            EnrollmentStatusHistory.version == '3.1'
+        ).one()
+        self.assertEqual('PARTICIPANT_PLUS_EHR', status_history.status)
+        self.assertEqual(ehr_consent_datetime, status_history.timestamp)
 
     def test_member_ordered_stored_times_for_multi_biobank_order_with_only_dv_consent(self):
         questionnaire_id = self.create_questionnaire("questionnaire3.json")
@@ -2205,7 +2283,7 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self._store_biobank_sample(participant_1, "1SAL", time=TIME_4)
         self._store_biobank_sample(participant_1, "2ED10", time=TIME_5)
         # Update participant summaries based on these changes.
-        self.ps_dao.update_from_biobank_stored_samples()
+        self.ps_dao.update_from_biobank_stored_samples(biobank_ids=[from_client_biobank_id(participant_1['biobankId'])])
 
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
         self.assertEqual(TIME_6.isoformat(), ps_1.get("enrollmentStatusMemberTime"))
@@ -2301,7 +2379,7 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self._store_biobank_sample(participant_1, "1SAL", time=TIME_4)
         self._store_biobank_sample(participant_1, "2ED10", time=TIME_5)
         # Update participant summaries based on these changes.
-        self.ps_dao.update_from_biobank_stored_samples()
+        self.ps_dao.update_from_biobank_stored_samples(biobank_ids=[from_client_biobank_id(participant_1['biobankId'])])
 
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
         self.assertEqual(TIME_6.isoformat(), ps_1.get("enrollmentStatusMemberTime"))
@@ -2392,7 +2470,7 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self._store_biobank_sample(participant_1, "1SAL", time=TIME_4)
         self._store_biobank_sample(participant_1, "2ED10", time=TIME_5)
         # Update participant summaries based on these changes.
-        self.ps_dao.update_from_biobank_stored_samples()
+        self.ps_dao.update_from_biobank_stored_samples(biobank_ids=[from_client_biobank_id(participant_1['biobankId'])])
 
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
         self.assertEqual(TIME_6.isoformat(), ps_1.get("enrollmentStatusMemberTime"))
@@ -2405,7 +2483,7 @@ class ParticipantSummaryApiTest(BaseTestCase):
         cancel_info = self.get_restore_or_cancel_info()
         self.send_patch(path, cancel_info)
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
-        self.assertEqual("CANCELLED", ps_1.get("physicalMeasurementsStatus"))
+        self.assertEqual("CANCELLED", ps_1.get("clinicPhysicalMeasurementsStatus"))
         self.assertEqual("2016-01-04T10:55:41", ps_1.get("enrollmentStatusCoreOrderedSampleTime"))
         self.assertEqual(TIME_4.isoformat(), ps_1.get("enrollmentStatusCoreStoredSampleTime"))
 
@@ -2429,9 +2507,9 @@ class ParticipantSummaryApiTest(BaseTestCase):
             pm_response2 = self.send_post(path, measurements_2)
 
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
-        self.assertEqual("COMPLETED", ps_1.get("physicalMeasurementsStatus"))
+        self.assertEqual("COMPLETED", ps_1.get("clinicPhysicalMeasurementsStatus"))
 
-        self.ps_dao.update_from_biobank_stored_samples()
+        self.ps_dao.update_from_biobank_stored_samples(biobank_ids=[from_client_biobank_id(participant_1['biobankId'])])
 
         # cancel a physical measurement
         path = "Participant/%s/PhysicalMeasurements" % participant_id_1
@@ -2441,11 +2519,11 @@ class ParticipantSummaryApiTest(BaseTestCase):
 
         ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
         # status should still be completed because participant has another valid PM
-        self.assertEqual("COMPLETED", ps_1.get("physicalMeasurementsStatus"))
-        self.assertEqual(ps_1.get("physicalMeasurementsFinalizedTime"), TIME_1.isoformat())
-        self.assertEqual(ps_1.get("physicalMeasurementsTime"), TIME_1.isoformat())
-        self.assertEqual(ps_1.get("physicalMeasurementsCreatedSite"), "hpo-site-monroeville")
-        self.assertEqual(ps_1.get("physicalMeasurementsFinalizedSite"), "hpo-site-bannerphoenix")
+        self.assertEqual("COMPLETED", ps_1.get("clinicPhysicalMeasurementsStatus"))
+        self.assertEqual(ps_1.get("clinicPhysicalMeasurementsFinalizedTime"), TIME_1.isoformat())
+        self.assertEqual(ps_1.get("clinicPhysicalMeasurementsTime"), TIME_1.isoformat())
+        self.assertEqual(ps_1.get("clinicPhysicalMeasurementsCreatedSite"), "hpo-site-monroeville")
+        self.assertEqual(ps_1.get("clinicPhysicalMeasurementsFinalizedSite"), "hpo-site-bannerphoenix")
 
     def test_participant_summary_returns_latest_pm(self):
         questionnaire_id_1 = self.create_questionnaire("all_consents_questionnaire.json")
@@ -2467,11 +2545,11 @@ class ParticipantSummaryApiTest(BaseTestCase):
             self.send_post(path, measurements_2)
 
         participant_summary = self.send_get("Participant/%s/Summary" % participant_id_1)
-        self.assertEqual(participant_summary["physicalMeasurementsStatus"], "COMPLETED")
-        self.assertEqual(participant_summary["physicalMeasurementsFinalizedTime"], TIME_2.isoformat())
-        self.assertEqual(participant_summary["physicalMeasurementsTime"], TIME_2.isoformat())
-        self.assertEqual(participant_summary["physicalMeasurementsFinalizedSite"], "hpo-site-clinic-phoenix")
-        self.assertEqual(participant_summary["physicalMeasurementsCreatedSite"], "hpo-site-bannerphoenix")
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsFinalizedTime"], TIME_2.isoformat())
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsTime"], TIME_2.isoformat())
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsFinalizedSite"], "hpo-site-clinic-phoenix")
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsCreatedSite"], "hpo-site-bannerphoenix")
 
     def test_switch_to_test_account(self):
         self.setup_codes(
@@ -2677,7 +2755,10 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self._store_biobank_sample(participant_3, "1SAL")
         self._store_biobank_sample(participant_3, "2ED10")
         # Update participant summaries based on these changes.
-        self.ps_dao.update_from_biobank_stored_samples()
+        self.ps_dao.update_from_biobank_stored_samples(biobank_ids=[
+            from_client_biobank_id(participant_json['biobankId'])
+            for participant_json in [participant_1, participant_3]
+        ])
         # Update version for participant 3, which has changed.
         participant_3 = self.send_get("Participant/%s" % participant_id_3)
 
@@ -2712,19 +2793,19 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self.assertEqual("UNSET", ps_1["sampleStatus2ED10"])
         self.assertEqual("RECEIVED", ps_1["sampleStatus1SAL2"])
         self.assertEqual("RECEIVED", ps_1["samplesToIsolateDNA"])
-        self.assertEqual("INTERESTED", ps_1["enrollmentStatus"])
-        self.assertEqual("UNSET", ps_1["physicalMeasurementsStatus"])
-        self.assertIsNone(ps_1.get("physicalMeasurementsTime"))
+        self.assertEqual("PARTICIPANT", ps_1["enrollmentStatusV3_1"])
+        self.assertEqual("UNSET", ps_1["clinicPhysicalMeasurementsStatus"])
+        self.assertIsNone(ps_1.get("clinicPhysicalMeasurementsTime"))
         self.assertEqual("GenderIdentity_Man", ps_1["genderIdentity"])
         self.assertEqual("NOT_WITHDRAWN", ps_1["withdrawalStatus"])
         self.assertEqual("NOT_SUSPENDED", ps_1["suspensionStatus"])
         self.assertEqual("email_code", ps_1["recontactMethod"])
         self.assertIsNone(ps_1.get("withdrawalTime"))
         self.assertIsNone(ps_1.get("suspensionTime"))
-        self.assertEqual("UNSET", ps_1["physicalMeasurementsCreatedSite"])
-        self.assertEqual("UNSET", ps_1["physicalMeasurementsFinalizedSite"])
-        self.assertIsNone(ps_1.get("physicalMeasurementsTime"))
-        self.assertIsNone(ps_1.get("physicalMeasurementsFinalizedTime"))
+        self.assertEqual("UNSET", ps_1["clinicPhysicalMeasurementsCreatedSite"])
+        self.assertEqual("UNSET", ps_1["clinicPhysicalMeasurementsFinalizedSite"])
+        self.assertIsNone(ps_1.get("clinicPhysicalMeasurementsTime"))
+        self.assertIsNone(ps_1.get("clinicPhysicalMeasurementsFinalizedTime"))
         self.assertEqual("FINALIZED", ps_1["biospecimenStatus"])
         self.assertEqual("2016-01-04T09:40:21", ps_1["biospecimenOrderTime"])
         self.assertEqual("hpo-site-monroeville", ps_1["biospecimenSourceSite"])
@@ -2750,19 +2831,19 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self.assertEqual("UNSET", ps_2["sampleStatus1SAL"])
         self.assertEqual("UNSET", ps_2["sampleStatus2ED10"])
         self.assertEqual("UNSET", ps_2["samplesToIsolateDNA"])
-        self.assertEqual("MEMBER", ps_2["enrollmentStatus"])
-        self.assertEqual("COMPLETED", ps_2["physicalMeasurementsStatus"])
-        self.assertEqual(TIME_2.isoformat(), ps_2["physicalMeasurementsTime"])
+        self.assertEqual("PARTICIPANT_PLUS_EHR", ps_2["enrollmentStatusV3_1"])
+        self.assertEqual("COMPLETED", ps_2["clinicPhysicalMeasurementsStatus"])
+        self.assertEqual(TIME_2.isoformat(), ps_2["clinicPhysicalMeasurementsTime"])
         self.assertEqual("GenderIdentity_Woman", ps_2["genderIdentity"])
         self.assertEqual("NO_USE", ps_2["withdrawalStatus"])
         self.assertEqual("DUPLICATE", ps_2["withdrawalReason"])
         self.assertEqual("NOT_SUSPENDED", ps_2["suspensionStatus"])
         self.assertEqual("NO_CONTACT", ps_2["recontactMethod"])
         self.assertIsNotNone(ps_2["withdrawalTime"])
-        self.assertEqual("hpo-site-monroeville", ps_2["physicalMeasurementsCreatedSite"])
-        self.assertEqual("hpo-site-bannerphoenix", ps_2["physicalMeasurementsFinalizedSite"])
-        self.assertEqual(TIME_2.isoformat(), ps_2["physicalMeasurementsTime"])
-        self.assertEqual(TIME_1.isoformat(), ps_2["physicalMeasurementsFinalizedTime"])
+        self.assertEqual("hpo-site-monroeville", ps_2["clinicPhysicalMeasurementsCreatedSite"])
+        self.assertEqual("hpo-site-bannerphoenix", ps_2["clinicPhysicalMeasurementsFinalizedSite"])
+        self.assertEqual(TIME_2.isoformat(), ps_2["clinicPhysicalMeasurementsTime"])
+        self.assertEqual(TIME_1.isoformat(), ps_2["clinicPhysicalMeasurementsFinalizedTime"])
         self.assertEqual("UNSET", ps_2["biospecimenStatus"])
         self.assertIsNone(ps_2.get("biospecimenOrderTime"))
         self.assertEqual("UNSET", ps_2["biospecimenSourceSite"])
@@ -2789,9 +2870,9 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self.assertEqual("RECEIVED", ps_3["sampleStatus2ED10"])
         self.assertEqual(TIME_1.isoformat(), ps_3["sampleStatus2ED10Time"])
         self.assertEqual("RECEIVED", ps_3["samplesToIsolateDNA"])
-        self.assertEqual("FULL_PARTICIPANT", ps_3["enrollmentStatus"])
-        self.assertEqual("COMPLETED", ps_3["physicalMeasurementsStatus"])
-        self.assertEqual(TIME_2.isoformat(), ps_3["physicalMeasurementsTime"])
+        self.assertEqual("CORE_PARTICIPANT", ps_3["enrollmentStatusV3_1"])
+        self.assertEqual("COMPLETED", ps_3["clinicPhysicalMeasurementsStatus"])
+        self.assertEqual(TIME_2.isoformat(), ps_3["clinicPhysicalMeasurementsTime"])
         self.assertEqual("GenderIdentity_NonBinary", ps_3["genderIdentity"])
         self.assertEqual("NOT_WITHDRAWN", ps_3["withdrawalStatus"])
         self.assertEqual("NOT_SUSPENDED", ps_3["suspensionStatus"])
@@ -2849,11 +2930,11 @@ class ParticipantSummaryApiTest(BaseTestCase):
                 "ParticipantSummary?_count=2&consentForStudyEnrollment=SUBMITTED", [[ps_1, ps_2], [ps_3]]
             )
             self.assertResponses("ParticipantSummary?_count=2&consentForCABoR=SUBMITTED", [[ps_1]])
-            self.assertResponses("ParticipantSummary?_count=2&physicalMeasurementsStatus=UNSET", [[ps_1]])
-            self.assertResponses("ParticipantSummary?_count=2&physicalMeasurementsStatus=COMPLETED", [[ps_2, ps_3]])
-            self.assertResponses("ParticipantSummary?_count=2&enrollmentStatus=INTERESTED", [[ps_1]])
-            self.assertResponses("ParticipantSummary?_count=2&enrollmentStatus=MEMBER", [[ps_2]])
-            self.assertResponses("ParticipantSummary?_count=2&enrollmentStatus=FULL_PARTICIPANT", [[ps_3]])
+            self.assertResponses("ParticipantSummary?_count=2&clinicPhysicalMeasurementsStatus=UNSET", [[ps_1]])
+            self.assertResponses("ParticipantSummary?_count=2&clinicPhysicalMeasurementsStatus=COMPLETED", [[ps_2, ps_3]])
+            self.assertResponses("ParticipantSummary?_count=2&enrollmentStatusV3_1=PARTICIPANT", [[ps_1]])
+            self.assertResponses("ParticipantSummary?_count=2&enrollmentStatusV3_1=PARTICIPANT_PLUS_EHR", [[ps_2]])
+            self.assertResponses("ParticipantSummary?_count=2&enrollmentStatusV3_1=CORE_PARTICIPANT", [[ps_3]])
             self.assertResponses("ParticipantSummary?_count=2&withdrawalStatus=NOT_WITHDRAWN", [[ps_1, ps_3]])
             self.assertResponses("ParticipantSummary?_count=2&withdrawalStatus=NO_USE", [[ps_2]])
             self.assertResponses("ParticipantSummary?_count=2&withdrawalTime=lt2016-01-03", [[]])
@@ -2862,17 +2943,17 @@ class ParticipantSummaryApiTest(BaseTestCase):
             self.assertResponses("ParticipantSummary?_count=2&suspensionStatus=NO_CONTACT", [[]])
             self.assertResponses("ParticipantSummary?_count=2&suspensionTime=lt2016-01-03", [[]])
             self.assertResponses("ParticipantSummary?_count=2&suspensionTime=ge2016-01-03", [[]])
-            self.assertResponses("ParticipantSummary?_count=2&physicalMeasurementsCreatedSite=UNSET", [[ps_1]])
+            self.assertResponses("ParticipantSummary?_count=2&clinicPhysicalMeasurementsCreatedSite=UNSET", [[ps_1]])
             self.assertResponses(
-                "ParticipantSummary?_count=2&" + "physicalMeasurementsCreatedSite=hpo-site-monroeville", [[ps_2, ps_3]]
+                "ParticipantSummary?_count=2&" + "clinicPhysicalMeasurementsCreatedSite=hpo-site-monroeville", [[ps_2, ps_3]]
             )
-            self.assertResponses("ParticipantSummary?_count=2&physicalMeasurementsFinalizedSite=UNSET", [[ps_1]])
+            self.assertResponses("ParticipantSummary?_count=2&clinicPhysicalMeasurementsFinalizedSite=UNSET", [[ps_1]])
             self.assertResponses(
-                "ParticipantSummary?_count=2&" + "physicalMeasurementsFinalizedSite=hpo-site-bannerphoenix",
+                "ParticipantSummary?_count=2&" + "clinicPhysicalMeasurementsFinalizedSite=hpo-site-bannerphoenix",
                 [[ps_2, ps_3]],
             )
-            self.assertResponses("ParticipantSummary?_count=2&physicalMeasurementsStatus=UNSET", [[ps_1]])
-            self.assertResponses("ParticipantSummary?_count=2&physicalMeasurementsStatus=COMPLETED", [[ps_2, ps_3]])
+            self.assertResponses("ParticipantSummary?_count=2&clinicPhysicalMeasurementsStatus=UNSET", [[ps_1]])
+            self.assertResponses("ParticipantSummary?_count=2&clinicPhysicalMeasurementsStatus=COMPLETED", [[ps_2, ps_3]])
             self.assertResponses("ParticipantSummary?_count=2&biospecimenStatus=FINALIZED", [[ps_1]])
             self.assertResponses("ParticipantSummary?_count=2&biospecimenOrderTime=ge2016-01-04", [[ps_1]])
             self.assertResponses("ParticipantSummary?_count=2&biospecimenOrderTime=lt2016-01-04", [[]])
@@ -2898,7 +2979,7 @@ class ParticipantSummaryApiTest(BaseTestCase):
             self.assertResponses("ParticipantSummary?participantOrigin=vibrent", [[ps_2]])
             BaseTestCase.switch_auth_user("example@example.com", 'example')
         # Two days after participant 2 withdraws, their fields are not set for anything but
-        # participant ID, HPO ID, withdrawal status, and withdrawal time
+        # participant ID, HPO ID, withdrawal status, withdrawal time, and enrollment status
         with FakeClock(TIME_5):
             new_ps_1 = self.send_get("Participant/%s/Summary" % participant_id_1)
             new_ps_3 = self.send_get("Participant/%s/Summary" % participant_id_3)
@@ -2917,13 +2998,13 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self.assertEqual("UNSET", new_ps_2["sampleStatus1ED10"])
         self.assertEqual("UNSET", new_ps_2["sampleStatus1SAL"])
         self.assertEqual("UNSET", new_ps_2["samplesToIsolateDNA"])
-        self.assertEqual("MEMBER", new_ps_2["enrollmentStatus"])
-        self.assertEqual("UNSET", new_ps_2["physicalMeasurementsStatus"])
+        self.assertEqual("PARTICIPANT_PLUS_EHR", new_ps_2["enrollmentStatusV3_1"])
+        self.assertEqual("UNSET", new_ps_2["clinicPhysicalMeasurementsStatus"])
         self.assertEqual("SUBMITTED", new_ps_2["consentForStudyEnrollment"])
         self.assertIsNotNone(new_ps_2["consentForStudyEnrollmentAuthored"])
         self.assertEqual("SUBMITTED", new_ps_2["consentForElectronicHealthRecords"])
         self.assertIsNotNone(new_ps_2["consentForElectronicHealthRecordsAuthored"])
-        self.assertIsNone(new_ps_2.get("physicalMeasurementsTime"))
+        self.assertIsNone(new_ps_2.get("clinicPhysicalMeasurementsTime"))
         self.assertEqual("UNSET", new_ps_2["genderIdentity"])
         self.assertEqual("NO_USE", new_ps_2["withdrawalStatus"])
         self.assertEqual(ps_2["biobankId"], new_ps_2["biobankId"])
@@ -3088,7 +3169,10 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self._store_biobank_sample(participant_3, "1SAL")
         self._store_biobank_sample(participant_3, "2ED10")
         # Update participant summaries based on these changes.
-        self.ps_dao.update_from_biobank_stored_samples()
+        self.ps_dao.update_from_biobank_stored_samples(biobank_ids=[
+            from_client_biobank_id(participant_json['biobankId'])
+            for participant_json in [participant_1, participant_3]
+        ])
 
         ps_2 = self.send_get("Participant/%s/Summary" % participant_id_2)
         self.assertEqual("SUBMITTED", ps_2["consentForDvElectronicHealthRecordsSharing"])
@@ -3124,18 +3208,18 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self.assertEqual("RECEIVED", ps_1["sampleStatus1SAL2"])
         self.assertEqual("RECEIVED", ps_1["samplesToIsolateDNA"])
         self.assertEqual("INTERESTED", ps_1["enrollmentStatus"])
-        self.assertEqual("UNSET", ps_1["physicalMeasurementsStatus"])
-        self.assertIsNone(ps_1.get("physicalMeasurementsTime"))
+        self.assertEqual("UNSET", ps_1["clinicPhysicalMeasurementsStatus"])
+        self.assertIsNone(ps_1.get("clinicPhysicalMeasurementsTime"))
         self.assertEqual("GenderIdentity_Man", ps_1["genderIdentity"])
         self.assertEqual("NOT_WITHDRAWN", ps_1["withdrawalStatus"])
         self.assertEqual("NOT_SUSPENDED", ps_1["suspensionStatus"])
         self.assertEqual("email_code", ps_1["recontactMethod"])
         self.assertIsNone(ps_1.get("withdrawalTime"))
         self.assertIsNone(ps_1.get("suspensionTime"))
-        self.assertEqual("UNSET", ps_1["physicalMeasurementsCreatedSite"])
-        self.assertEqual("UNSET", ps_1["physicalMeasurementsFinalizedSite"])
-        self.assertIsNone(ps_1.get("physicalMeasurementsTime"))
-        self.assertIsNone(ps_1.get("physicalMeasurementsFinalizedTime"))
+        self.assertEqual("UNSET", ps_1["clinicPhysicalMeasurementsCreatedSite"])
+        self.assertEqual("UNSET", ps_1["clinicPhysicalMeasurementsFinalizedSite"])
+        self.assertIsNone(ps_1.get("clinicPhysicalMeasurementsTime"))
+        self.assertIsNone(ps_1.get("clinicPhysicalMeasurementsFinalizedTime"))
         self.assertEqual("FINALIZED", ps_1["biospecimenStatus"])
         self.assertEqual("2016-01-04T09:40:21", ps_1["biospecimenOrderTime"])
         self.assertEqual("hpo-site-monroeville", ps_1["biospecimenSourceSite"])
@@ -3161,18 +3245,18 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self.assertEqual("UNSET", ps_2["sampleStatus2ED10"])
         self.assertEqual("UNSET", ps_2["samplesToIsolateDNA"])
         self.assertEqual("MEMBER", ps_2["enrollmentStatus"])
-        self.assertEqual("COMPLETED", ps_2["physicalMeasurementsStatus"])
-        self.assertEqual(TIME_2.isoformat(), ps_2["physicalMeasurementsTime"])
+        self.assertEqual("COMPLETED", ps_2["clinicPhysicalMeasurementsStatus"])
+        self.assertEqual(TIME_2.isoformat(), ps_2["clinicPhysicalMeasurementsTime"])
         self.assertEqual("GenderIdentity_Woman", ps_2["genderIdentity"])
         self.assertEqual("NO_USE", ps_2["withdrawalStatus"])
         self.assertEqual("DUPLICATE", ps_2["withdrawalReason"])
         self.assertEqual("NOT_SUSPENDED", ps_2["suspensionStatus"])
         self.assertEqual("NO_CONTACT", ps_2["recontactMethod"])
         self.assertIsNotNone(ps_2["withdrawalTime"])
-        self.assertEqual("hpo-site-monroeville", ps_2["physicalMeasurementsCreatedSite"])
-        self.assertEqual("hpo-site-bannerphoenix", ps_2["physicalMeasurementsFinalizedSite"])
-        self.assertEqual(TIME_2.isoformat(), ps_2["physicalMeasurementsTime"])
-        self.assertEqual(TIME_1.isoformat(), ps_2["physicalMeasurementsFinalizedTime"])
+        self.assertEqual("hpo-site-monroeville", ps_2["clinicPhysicalMeasurementsCreatedSite"])
+        self.assertEqual("hpo-site-bannerphoenix", ps_2["clinicPhysicalMeasurementsFinalizedSite"])
+        self.assertEqual(TIME_2.isoformat(), ps_2["clinicPhysicalMeasurementsTime"])
+        self.assertEqual(TIME_1.isoformat(), ps_2["clinicPhysicalMeasurementsFinalizedTime"])
         self.assertEqual("UNSET", ps_2["biospecimenStatus"])
         self.assertIsNone(ps_2.get("biospecimenOrderTime"))
         self.assertEqual("UNSET", ps_2["biospecimenSourceSite"])
@@ -3199,8 +3283,8 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self.assertEqual(TIME_1.isoformat(), ps_3["sampleStatus2ED10Time"])
         self.assertEqual("RECEIVED", ps_3["samplesToIsolateDNA"])
         self.assertEqual("FULL_PARTICIPANT", ps_3["enrollmentStatus"])
-        self.assertEqual("COMPLETED", ps_3["physicalMeasurementsStatus"])
-        self.assertEqual(TIME_2.isoformat(), ps_3["physicalMeasurementsTime"])
+        self.assertEqual("COMPLETED", ps_3["clinicPhysicalMeasurementsStatus"])
+        self.assertEqual(TIME_2.isoformat(), ps_3["clinicPhysicalMeasurementsTime"])
         self.assertEqual("GenderIdentity_Man", ps_3["genderIdentity"])
         self.assertEqual("NOT_WITHDRAWN", ps_3["withdrawalStatus"])
         self.assertEqual("NOT_SUSPENDED", ps_3["suspensionStatus"])
@@ -3256,8 +3340,8 @@ class ParticipantSummaryApiTest(BaseTestCase):
                 "ParticipantSummary?_count=2&consentForStudyEnrollment=SUBMITTED", [[ps_1, ps_2], [ps_3]]
             )
             self.assertResponses("ParticipantSummary?_count=2&consentForCABoR=SUBMITTED", [[ps_1]])
-            self.assertResponses("ParticipantSummary?_count=2&physicalMeasurementsStatus=UNSET", [[ps_1]])
-            self.assertResponses("ParticipantSummary?_count=2&physicalMeasurementsStatus=COMPLETED", [[ps_2, ps_3]])
+            self.assertResponses("ParticipantSummary?_count=2&clinicPhysicalMeasurementsStatus=UNSET", [[ps_1]])
+            self.assertResponses("ParticipantSummary?_count=2&clinicPhysicalMeasurementsStatus=COMPLETED", [[ps_2, ps_3]])
             self.assertResponses("ParticipantSummary?_count=2&enrollmentStatus=INTERESTED", [[ps_1]])
             self.assertResponses("ParticipantSummary?_count=2&enrollmentStatus=MEMBER", [[ps_2]])
             self.assertResponses("ParticipantSummary?_count=2&enrollmentStatus=FULL_PARTICIPANT", [[ps_3]])
@@ -3269,17 +3353,17 @@ class ParticipantSummaryApiTest(BaseTestCase):
             self.assertResponses("ParticipantSummary?_count=2&suspensionStatus=NO_CONTACT", [[]])
             self.assertResponses("ParticipantSummary?_count=2&suspensionTime=lt2016-01-03", [[]])
             self.assertResponses("ParticipantSummary?_count=2&suspensionTime=ge2016-01-03", [[]])
-            self.assertResponses("ParticipantSummary?_count=2&physicalMeasurementsCreatedSite=UNSET", [[ps_1]])
+            self.assertResponses("ParticipantSummary?_count=2&clinicPhysicalMeasurementsCreatedSite=UNSET", [[ps_1]])
             self.assertResponses(
-                "ParticipantSummary?_count=2&" + "physicalMeasurementsCreatedSite=hpo-site-monroeville", [[ps_2, ps_3]]
+                "ParticipantSummary?_count=2&" + "clinicPhysicalMeasurementsCreatedSite=hpo-site-monroeville", [[ps_2, ps_3]]
             )
-            self.assertResponses("ParticipantSummary?_count=2&physicalMeasurementsFinalizedSite=UNSET", [[ps_1]])
+            self.assertResponses("ParticipantSummary?_count=2&clinicPhysicalMeasurementsFinalizedSite=UNSET", [[ps_1]])
             self.assertResponses(
-                "ParticipantSummary?_count=2&" + "physicalMeasurementsFinalizedSite=hpo-site-bannerphoenix",
+                "ParticipantSummary?_count=2&" + "clinicPhysicalMeasurementsFinalizedSite=hpo-site-bannerphoenix",
                 [[ps_2, ps_3]],
             )
-            self.assertResponses("ParticipantSummary?_count=2&physicalMeasurementsStatus=UNSET", [[ps_1]])
-            self.assertResponses("ParticipantSummary?_count=2&physicalMeasurementsStatus=COMPLETED", [[ps_2, ps_3]])
+            self.assertResponses("ParticipantSummary?_count=2&clinicPhysicalMeasurementsStatus=UNSET", [[ps_1]])
+            self.assertResponses("ParticipantSummary?_count=2&clinicPhysicalMeasurementsStatus=COMPLETED", [[ps_2, ps_3]])
             self.assertResponses("ParticipantSummary?_count=2&biospecimenStatus=FINALIZED", [[ps_1]])
             self.assertResponses("ParticipantSummary?_count=2&biospecimenOrderTime=ge2016-01-04", [[ps_1]])
             self.assertResponses("ParticipantSummary?_count=2&biospecimenOrderTime=lt2016-01-04", [[]])
@@ -3332,14 +3416,14 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self.assertEqual("UNSET", new_ps_2["sampleStatus1SAL"])
         self.assertEqual("UNSET", new_ps_2["samplesToIsolateDNA"])
         self.assertEqual("MEMBER", new_ps_2["enrollmentStatus"])
-        self.assertEqual("UNSET", new_ps_2["physicalMeasurementsStatus"])
+        self.assertEqual("UNSET", new_ps_2["clinicPhysicalMeasurementsStatus"])
         self.assertEqual("SUBMITTED", new_ps_2["consentForStudyEnrollment"])
         self.assertIsNotNone(new_ps_2["consentForStudyEnrollmentAuthored"])
         self.assertEqual("UNSET", new_ps_2["consentForElectronicHealthRecords"])
         self.assertIsNone(new_ps_2.get("consentForElectronicHealthRecordsAuthored"))
         self.assertEqual("UNSET", new_ps_2["consentForDvElectronicHealthRecordsSharing"])
         self.assertIsNone(new_ps_2.get("consentForDvElectronicHealthRecordsSharingTime"))
-        self.assertIsNone(new_ps_2.get("physicalMeasurementsTime"))
+        self.assertIsNone(new_ps_2.get("clinicPhysicalMeasurementsTime"))
         self.assertEqual("UNSET", new_ps_2["genderIdentity"])
         self.assertEqual("NO_USE", new_ps_2["withdrawalStatus"])
         self.assertEqual(ps_2["biobankId"], new_ps_2["biobankId"])
@@ -3627,7 +3711,7 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self.send_get("ParticipantSummary?suspensionStatus=test", expected_status=400)
 
     def test_ehr_field_mapping(self):
-        """Check that the new set of EHR data availablity fields are present on the summary"""
+        """Check that the new set of EHR data availability fields are present on the summary"""
         first_receipt_time = datetime.datetime(2020, 3, 27)
         latest_receipt_time = datetime.datetime(2020, 8, 4)
 
@@ -3652,6 +3736,167 @@ class ParticipantSummaryApiTest(BaseTestCase):
         response = self.send_get(f'ParticipantSummary?_count=1&_sort=lastModified&awardee=PITT&_sync=true')
         self.assertEqual(first_receipt_time.isoformat(), response['entry'][0]['resource']['firstEhrReceiptTime'])
         self.assertEqual(latest_receipt_time.isoformat(), response['entry'][0]['resource']['latestEhrReceiptTime'])
+
+    def test_digital_health_sharing(self):
+        """Check that the new set of Digital Health Sharing data availability fields are present on the summary"""
+        first_receipt_time = datetime.datetime(2020, 3, 27)
+        latest_receipt_time = datetime.datetime(2020, 8, 4)
+
+        sharing_summary = self.data_generator.create_database_participant_summary(
+            hpoId=2,  # PITT
+            ehrStatus=EhrStatus.PRESENT,
+            isEhrDataAvailable=True,
+            ehrReceiptTime=first_receipt_time,
+            ehrUpdateTime=latest_receipt_time
+        )
+        not_sharing_summary = self.data_generator.create_database_participant_summary(
+            hpoId=2,  # PITT
+            ehrStatus=EhrStatus.NOT_PRESENT
+        )
+
+        # Check fields on participant that is sharing
+        response = self.send_get(f'Participant/P{sharing_summary.participantId}/Summary')
+        self.assertEqual('CURRENTLY_SHARING', response['healthDataStreamSharingStatusV3_1'])
+        self.assertEqual(latest_receipt_time.isoformat(), response['healthDataStreamSharingStatusV3_1Time'])
+
+        # Check fields on participant that is NOT sharing
+        response = self.send_get(f'Participant/P{not_sharing_summary.participantId}/Summary')
+        self.assertEqual('NEVER_SHARED', response['healthDataStreamSharingStatusV3_1'])
+        self.assertNotIn('healthDataStreamSharingStatusV3_1Time', response)
+
+        # Check the ordering of participants based on status
+        response = self.send_get(f'ParticipantSummary?_sort=healthDataStreamSharingStatusV3_1&awardee=PITT&_sync=false')
+        participant_id_list = [
+            from_client_participant_id(entry['resource']['participantId'])
+            for entry in response['entry']
+        ]
+        self.assertEqual(not_sharing_summary.participantId, participant_id_list[0])
+        self.assertEqual(sharing_summary.participantId, participant_id_list[1])
+
+        # Add in another participant and check the ordering based on the sharing date
+        later_shared_summary = self.data_generator.create_database_participant_summary(
+            hpoId=2,  # PITT
+            ehrStatus=EhrStatus.PRESENT,
+            isEhrDataAvailable=False,
+            ehrReceiptTime=datetime.datetime(2021, 8, 4),
+            ehrUpdateTime=datetime.datetime(2021, 8, 4)
+        )
+        response = self.send_get(
+            f'ParticipantSummary?_sort=healthDataStreamSharingStatusV3_1Time&awardee=PITT&_sync=false'
+        )
+        participant_id_list = [
+            from_client_participant_id(entry['resource']['participantId'])
+            for entry in response['entry']
+        ]
+        self.assertEqual(not_sharing_summary.participantId, participant_id_list[0])
+        self.assertEqual(sharing_summary.participantId, participant_id_list[1])
+        self.assertEqual(later_shared_summary.participantId, participant_id_list[2])
+
+    def test_disabling_data_glossary_3_fields(self):
+        """Check that the 3.x enrollment statuses and digital health sharing fields are disabled by default"""
+        summary = self.data_generator.create_database_participant_summary()
+
+        # Override the default config, disabling the fields on the API
+        self.temporarily_override_config_setting(config.ENABLE_ENROLLMENT_STATUS_3, False)
+        self.temporarily_override_config_setting(config.ENABLE_HEALTH_SHARING_STATUS_3, False)
+
+        # Check that the new fields are hidden
+        api_response = self.send_get(f'Participant/P{summary.participantId}/Summary')
+        self.assertNotIn('enrollmentStatusV3_0', api_response)
+        self.assertNotIn('enrollmentStatusV3_1', api_response)
+        self.assertNotIn('healthDataStreamSharingStatusV3_1', api_response)
+
+    def test_mediated_ehr(self):
+        """Check that the new set of participant mediated EHR data availability fields are present on the summary"""
+        first_mediated_ehr_receipt_time = datetime.datetime(2022, 11, 1)
+        latest_mediated_ehr_receipt_time = datetime.datetime(2022, 12, 5)
+
+        sharing_mediated_ehr_summary = self.data_generator.create_database_participant_summary(
+            hpoId=2,  # PITT
+            ehrStatus=EhrStatus.NOT_PRESENT,
+            wasParticipantMediatedEhrAvailable=True,
+            firstParticipantMediatedEhrReceiptTime=first_mediated_ehr_receipt_time,
+            latestParticipantMediatedEhrReceiptTime=latest_mediated_ehr_receipt_time
+        )
+
+        not_sharing_summary = self.data_generator.create_database_participant_summary(
+            hpoId=2,  # PITT
+        )
+
+        # Check fields on participant that is sharing mediated EHR
+        response = self.send_get(f'Participant/P{sharing_mediated_ehr_summary.participantId}/Summary')
+        self.assertEqual(first_mediated_ehr_receipt_time.isoformat(),
+                         response['firstParticipantMediatedEhrReceiptTime'])
+        self.assertEqual(latest_mediated_ehr_receipt_time.isoformat(),
+                         response['latestParticipantMediatedEhrReceiptTime'])
+        self.assertEqual('EVER_SHARED', response['healthDataStreamSharingStatusV3_1'])
+        self.assertEqual(latest_mediated_ehr_receipt_time.isoformat(),
+                         response['healthDataStreamSharingStatusV3_1Time'])
+
+        # Check fields on participant that is NOT sharing
+        response = self.send_get(f'Participant/P{not_sharing_summary.participantId}/Summary')
+        self.assertEqual('NEVER_SHARED', response['healthDataStreamSharingStatusV3_1'])
+        self.assertNotIn('healthDataStreamSharingStatusV3_1Time', response)
+
+    def test_mediated_and_hpo_ehr_shared(self):
+        first_receipt_time = datetime.datetime(2020, 3, 27)
+        intermediate_receipt_time = datetime.datetime(2021, 6, 1)
+        latest_receipt_time = datetime.datetime(2022, 12, 5)
+
+        mediated_most_recently_shared_summary = self.data_generator.create_database_participant_summary(
+            hpoId=2,
+            isEhrDataAvailable=False,
+            ehrStatus=EhrStatus.PRESENT,
+            wasParticipantMediatedEhrAvailable=True,
+            ehrReceiptTime=first_receipt_time,
+            ehrUpdateTime=intermediate_receipt_time,
+            firstParticipantMediatedEhrReceiptTime=latest_receipt_time,
+            latestParticipantMediatedEhrReceiptTime=latest_receipt_time
+        )
+
+        hpo_ehr_most_recently_shared_summary = self.data_generator.create_database_participant_summary(
+            hpoId=2,
+            isEhrDataAvailable=False,
+            ehrStatus=EhrStatus.PRESENT,
+            wasParticipantMediatedEhrAvailable=True,
+            ehrReceiptTime=intermediate_receipt_time,
+            ehrUpdateTime=latest_receipt_time,
+            firstParticipantMediatedEhrReceiptTime=first_receipt_time,
+            latestParticipantMediatedEhrReceiptTime=first_receipt_time
+        )
+
+        # Check participant where most recently shared is the mediated EHR
+        response = self.send_get(f'Participant/P{mediated_most_recently_shared_summary.participantId}/Summary')
+        self.assertEqual(latest_receipt_time.isoformat(),
+                         response['latestParticipantMediatedEhrReceiptTime'])
+        self.assertEqual(intermediate_receipt_time.isoformat(),
+                         response['ehrUpdateTime'])
+        self.assertEqual('EVER_SHARED', response['healthDataStreamSharingStatusV3_1'])
+        self.assertEqual(latest_receipt_time.isoformat(),
+                         response['healthDataStreamSharingStatusV3_1Time'])
+
+        # Check participant where most recently shared is the HPO-provided EHR
+        response = self.send_get(f'Participant/P{hpo_ehr_most_recently_shared_summary.participantId}/Summary')
+        self.assertEqual(latest_receipt_time.isoformat(),
+                         response['ehrUpdateTime'])
+        self.assertEqual(first_receipt_time.isoformat(),
+                         response['latestParticipantMediatedEhrReceiptTime'])
+        self.assertEqual('EVER_SHARED', response['healthDataStreamSharingStatusV3_1'])
+        self.assertEqual(latest_receipt_time.isoformat(),
+                         response['healthDataStreamSharingStatusV3_1Time'])
+
+    def test_disabling_mediated_ehr_fields(self):
+        """Check that the participant mediated EHR fields are disabled by default"""
+        summary = self.data_generator.create_database_participant_summary()
+
+        # Override the default config, disabling the fields on the API
+        self.temporarily_override_config_setting(config.ENABLE_PARTICIPANT_MEDIATED_EHR, False)
+
+        # Check that the new fields are hidden
+        api_response = self.send_get(f'Participant/P{summary.participantId}/Summary')
+        self.assertNotIn('wasParticipantMediatedEhrAvailable', api_response)
+        self.assertNotIn('firstParticipantMediatedEhrReceiptTime', api_response)
+        self.assertNotIn('latestParticipantMediatedEhrReceiptTime', api_response)
 
     def test_blank_demographics_data_mapped_to_skip(self):
         # Create a participant summary that doesn't use skip codes for the demographics questions that weren't answered.
@@ -3727,7 +3972,42 @@ class ParticipantSummaryApiTest(BaseTestCase):
             mar_participant_id
         ], response_ids)
 
-    #### begin POST to ParticipantSummary API
+    def test_api_sort_with_state_field(self):
+        """Check that state field can be used as a sort argument through the API"""
+        code_dao = CodeDao()
+
+        with FakeClock(TIME_1):
+            self.setup_codes(
+                ["Washington", "Montana", "Missouri", "Mississippi", "Massachusetts"],
+                code_type=CodeType.ANSWER,
+            )
+
+        def generate_participant_with_state(state):
+            summary = self.data_generator.create_database_participant_summary(
+                stateId=code_dao.get_code(PPI_SYSTEM, state).codeId
+            )
+            return to_client_participant_id(summary.participantId)
+
+        wa_participant_id = generate_participant_with_state("Washington")
+        mo_participant_id = generate_participant_with_state("Missouri")
+        ma_participant_id = generate_participant_with_state("Massachusetts")
+        mt_participant_id = generate_participant_with_state("Montana")
+        ms_participant_id = generate_participant_with_state("Mississippi")
+        null_state_participant_id = to_client_participant_id(
+            self.data_generator.create_database_participant_summary().participantId)
+
+        response = self.send_get('ParticipantSummary?_sort=state')
+        response_ids = [entry['resource']['participantId'] for entry in response['entry']]
+        self.assertEqual([
+            null_state_participant_id,
+            ma_participant_id,
+            ms_participant_id,
+            mo_participant_id,
+            mt_participant_id,
+            wa_participant_id
+        ], response_ids)
+
+    # Begin POST to ParticipantSummary API
     def test_response_for_pid_not_found_in_post(self):
         bad_pid = 'P12345'
 
@@ -3987,4 +4267,200 @@ class ParticipantSummaryApiTest(BaseTestCase):
         self.assertEqual(len(responses), num_summary // 2)
         self.assertTrue(all(obj['resource']['site'] == monroe.googleGroup for obj in responses))
         self.assertFalse(any(obj['resource']['site'] == phoenix.googleGroup for obj in responses))
+
+    def test_filter_payload_roles(self):
+        num_summary, first_name, first_pid = 4, 'Testy', None
+
+        for num in range(num_summary):
+            ps = self.data_generator.create_database_participant_summary(
+                firstName=first_name,
+                lastName=f'Tester_{num}',
+            )
+            if num == 0:
+                first_pid = ps.participantId
+
+        # edit role to match config entry
+        self.overwrite_test_user_roles([SUPPORT])
+
+        # only fields that should be returned
+        filtered_fields = config.getSettingJson(config.OPS_DATA_PAYLOAD_ROLES)['support']['fields']
+
+        response = self.send_get(f"ParticipantSummary?firstName={first_name}")
+        self.assertIsNotNone(response)
+        response_entries = response['entry']
+
+        for entry in response_entries:
+            resource = entry['resource']
+            # no extra keys in response resource
+            self.assertTrue(not len(resource.keys() - filtered_fields))
+
+        response = self.send_get(f"Participant/P{first_pid}/Summary")
+        self.assertIsNotNone(response)
+        # no extra keys in resource
+        self.assertTrue(not len(response.keys() - filtered_fields))
+
+        # change role to un-match config entry
+        self.overwrite_test_user_roles([HEALTHPRO])
+
+        response = self.send_get(f"ParticipantSummary?firstName={first_name}")
+        self.assertIsNotNone(response)
+        response_entries = response['entry']
+
+        for entry in response_entries:
+            resource = entry['resource']
+            # should have extra keys in response
+            self.assertTrue(len(resource.keys() - filtered_fields))
+
+        response = self.send_get(f"Participant/P{first_pid}/Summary")
+        self.assertIsNotNone(response)
+        # should have extra keys in response
+        self.assertTrue(len(response.keys() - filtered_fields))
+
+    def test_synthetic_pm_fields(self):
+        questionnaire_id = self.create_questionnaire("all_consents_questionnaire.json")
+        remote_pm_questionnaire_id = self.create_questionnaire("remote_pm_questionnaire.json")
+        participant = self.send_post("Participant", {})
+        participant_id = participant["participantId"]
+        with FakeClock(TIME_6):
+            self.send_consent(participant_id)
+
+        self._submit_consent_questionnaire_response(
+            participant_id, questionnaire_id, CONSENT_PERMISSION_YES_CODE, time=TIME_6
+        )
+        # test no pm submitted
+        participant_summary = self.send_get("Participant/%s/Summary" % participant_id)
+
+        self.assertEqual(participant_summary["physicalMeasurementsStatus"], "UNSET")
+        self.assertEqual(participant_summary["physicalMeasurementsFinalizedSite"], "UNSET")
+        self.assertEqual(participant_summary["physicalMeasurementsCreatedSite"], "UNSET")
+        self.assertEqual(participant_summary["physicalMeasurementsCollectType"], "UNSET")
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsStatus"], "UNSET")
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsFinalizedSite"], "UNSET")
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsCreatedSite"], "UNSET")
+
+        measurements_1 = load_measurement_json(participant_id, TIME_1.isoformat())
+        path = "Participant/%s/PhysicalMeasurements" % participant_id
+        with FakeClock(TIME_1):
+            self.send_post(path, measurements_1)
+
+        participant_summary = self.send_get("Participant/%s/Summary" % participant_id)
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsFinalizedTime"], TIME_1.isoformat())
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsTime"], TIME_1.isoformat())
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsFinalizedSite"], "hpo-site-bannerphoenix")
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsCreatedSite"], "hpo-site-monroeville")
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsStatus"],
+                         participant_summary["physicalMeasurementsStatus"])
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsFinalizedTime"],
+                         participant_summary["physicalMeasurementsFinalizedTime"])
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsTime"],
+                         participant_summary["physicalMeasurementsTime"])
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsFinalizedSite"],
+                         participant_summary["physicalMeasurementsFinalizedSite"])
+        self.assertEqual(participant_summary["clinicPhysicalMeasurementsCreatedSite"],
+                         participant_summary["physicalMeasurementsCreatedSite"])
+
+        resource = load_qr_response_json("remote_pm_response_metric.json", remote_pm_questionnaire_id,
+                                         participant_id)
+        remote_pm_path = "Participant/%s/QuestionnaireResponse" % participant_id
+        with FakeClock(TIME_2):
+            self.send_post(remote_pm_path, resource)
+
+        participant_summary = self.send_get("Participant/%s/Summary" % participant_id)
+        self.assertEqual(participant_summary["selfReportedPhysicalMeasurementsStatus"], "COMPLETED")
+        self.assertEqual(participant_summary["selfReportedPhysicalMeasurementsAuthored"], "2022-06-01T18:26:08")
+        self.assertEqual(participant_summary["selfReportedPhysicalMeasurementsStatus"],
+                         participant_summary["physicalMeasurementsStatus"])
+        self.assertEqual(participant_summary["selfReportedPhysicalMeasurementsAuthored"],
+                         participant_summary["physicalMeasurementsFinalizedTime"])
+        self.assertEqual(participant_summary["physicalMeasurementsFinalizedSite"], "UNSET")
+        self.assertEqual(participant_summary["physicalMeasurementsCreatedSite"], "UNSET")
+
+    def test_updated_since_parameter(self):
+        """
+        The API should have the ability to only return a set of
+        participant's that have been modified since a specified date
+        """
+        cutoff_date = datetime.datetime(2022, 3, 15)
+        expected_participant_list = [
+            self.data_generator.create_database_participant_summary(
+                lastModified=cutoff_date + datetime.timedelta(days=5)
+            ),
+            self.data_generator.create_database_participant_summary(
+                lastModified=cutoff_date + datetime.timedelta(minutes=1)
+            ),
+            self.data_generator.create_database_participant_summary(
+                lastModified=cutoff_date + datetime.timedelta(days=20)
+            ),
+            self.data_generator.create_database_participant_summary(
+                lastModified=cutoff_date + datetime.timedelta(days=30)
+            )
+        ]
+        unexpected_participant_list = [
+            self.data_generator.create_database_participant_summary(
+                lastModified=cutoff_date - datetime.timedelta(days=5)
+            ),
+            self.data_generator.create_database_participant_summary(
+                lastModified=cutoff_date - datetime.timedelta(minutes=1)
+            ),
+            self.data_generator.create_database_participant_summary(
+                lastModified=cutoff_date - datetime.timedelta(days=400)
+            ),
+            self.data_generator.create_database_participant_summary(
+                lastModified=cutoff_date - datetime.timedelta(days=30)
+            )
+        ]
+
+        response = self.send_get('ParticipantSummary?updatedSince=2022-03-15')
+        response_ids = [
+            from_client_participant_id(participant_json['resource']['participantId'])
+            for participant_json in response['entry']
+        ]
+        self.assertTrue(all(
+            expected_participant.participantId in response_ids
+            for expected_participant in expected_participant_list
+        ))
+        self.assertFalse(any(
+            unexpected_participant.participantId in response_ids
+            for unexpected_participant in unexpected_participant_list
+        ))
+
+    def test_remote_id_verified(self):
+        """ Test to see if a remote ID verification True Response saves successfully """
+        participant = self.data_generator.create_database_participant()
+        participant_id = f'P{participant.participantId}'
+        authored = datetime.datetime.now()
+        self.send_consent(participant.participantId, authored=authored)
+        questionnaire_id = self.create_questionnaire("remote_id_verification_questionnaire.json")
+        resource = load_qr_response_json(
+            'remote_id_verification_questionnaire_response.json',
+            questionnaire_id,
+            participant_id
+        )
+        self.send_post("Participant/%s/QuestionnaireResponse" % participant_id, resource)
+        # Get request from API to assert information is accurate
+        summary = self.send_get("Participant/%s/Summary" % participant_id)
+        self.assertEqual(summary['remoteIdVerificationOrigin'], 'example')
+        self.assertEqual(summary['remoteIdVerificationStatus'], True)
+        self.assertEqual(summary['remoteIdVerifiedOn'], '2023-01-17')
+
+    def test_remote_id_not_verified(self):
+        """ Test to see if a remote ID verification False Response saves successfully """
+        # Set up participant, questionnaire, questionnaire response & send POST request to API
+        participant = self.data_generator.create_database_participant()
+        participant_id = f'P{participant.participantId}'
+        authored = datetime.datetime.now()
+        self.send_consent(participant.participantId, authored=authored)
+        questionnaire_id = self.create_questionnaire("remote_id_verification_questionnaire.json")
+        resource = load_qr_response_json(
+            'remote_id_verification_questionnaire_false_response.json',
+            questionnaire_id,
+            participant_id
+        )
+        self.send_post("Participant/%s/QuestionnaireResponse" % participant_id, resource)
+        # Get request from API to assert information is accurate
+        summary = self.send_get("Participant/%s/Summary" % participant_id)
+        self.assertEqual(summary['remoteIdVerificationOrigin'], 'example')
+        self.assertNotIn('remoteIdVerifiedOn', summary)
+        self.assertEqual(summary['remoteIdVerificationStatus'], False)
 
