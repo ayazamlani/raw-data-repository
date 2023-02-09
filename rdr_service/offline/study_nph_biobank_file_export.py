@@ -4,12 +4,13 @@ from collections import defaultdict
 from functools import lru_cache
 from typing import List, Dict, Any, Iterable, Optional
 from json import dump
-from re import findall
 
 from sqlalchemy import and_
+from sqlalchemy.orm import joinedload, aliased
 from google.cloud import storage
 from rdr_service import config
 from rdr_service.api_util import open_cloud_file
+from rdr_service.model.code import Code
 from rdr_service.model.participant_summary import ParticipantSummary as RdrParticipantSummary
 from rdr_service.model.rex import ParticipantMapping as RexParticipantMapping
 from rdr_service.model.study_nph import (
@@ -22,6 +23,7 @@ from rdr_service.model.study_nph import (
     SampleExport
 )
 
+from rdr_service.dao.code_dao import CodeDao
 from rdr_service.dao.participant_summary_dao import ParticipantSummaryDao as RdrParticipantSummaryDao
 from rdr_service.dao.rex_dao import RexParticipantMappingDao
 from rdr_service.dao.study_nph_dao import (
@@ -37,6 +39,10 @@ from rdr_service.dao.study_nph_dao import (
 
 # FILE_BUFFER_SIZE_IN_BYTES = 1024 * 1024 # 1MB File Buffer
 NPH_ANCILLARY_STUDY_ID = 2
+
+
+def _format_timestamp(timestamp: datetime) -> str:
+    return timestamp.strftime('%Y-%m-%dT%H:%M:%SZ') if timestamp else ''
 
 
 def _get_nph_participant(participant_id: int) -> NphParticipant:
@@ -55,10 +61,14 @@ def _get_latest_biobank_file_export() -> BiobankFileExport:
 
 def _get_sample_updates_since_last_file_export() -> Iterable[SampleUpdate]:
     last_successful_biobank_file_export = _get_latest_biobank_file_export()
+    if last_successful_biobank_file_export is not None:
+        last_successful_biobank_file_export_date = last_successful_biobank_file_export.created
+    else:
+        last_successful_biobank_file_export_date = datetime(year=2023, month=1, day=1)
     sample_update_dao = NphSampleUpdateDao()
     with sample_update_dao.session() as session:
         return session.query(SampleUpdate).filter(
-            SampleUpdate.created >= last_successful_biobank_file_export.created
+            SampleUpdate.created >= last_successful_biobank_file_export_date
         ).all()
 
 
@@ -74,7 +84,8 @@ def _get_orders_related_to_sample_updates(sample_updates: Iterable[SampleUpdate]
     with nph_orders_dao.session() as session:
         order_ids = list(ordered_sample.order_id for ordered_sample in ordered_samples)
         orders: Iterable[Order] = session.query(Order).filter(
-            Order.id.in_(order_ids)
+            Order.id.in_(order_ids),
+            Order.ignore_flag == 0
         ).distinct().all()
 
     return orders
@@ -93,31 +104,51 @@ def _get_parent_study_category(study_category_id: int) -> StudyCategory:
     return _get_study_category(study_category.parent_id)
 
 
+@lru_cache(maxsize=128, typed=False)
+def _get_code_obj_from_sex_id(sex_id: int) -> Code:
+    rdr_code_dao = CodeDao()
+    with rdr_code_dao.session() as rdr_code_session:
+        return rdr_code_session.query(Code).filter(
+            Code.codeId == sex_id
+        ).first()
+
+
 def _get_ordered_samples(order_id: int) -> List[OrderedSample]:
     ordered_sample_dao = NphOrderedSampleDao()
+    child_sample = aliased(OrderedSample)
     with ordered_sample_dao.session() as session:
-        return session.query(OrderedSample).filter(
-            and_(
+        query = (
+            session.query(OrderedSample).outerjoin(
+                child_sample,
+                child_sample.parent_sample_id == OrderedSample.id
+            ).filter(
                 OrderedSample.order_id == order_id,
-                OrderedSample.aliquot_id.is_not(None)
+                child_sample.id.is_(None)
+            ).options(
+                joinedload(OrderedSample.parent)
             )
-        ).all()
+        )
+        return query.all()
 
 
-def _convert_ordered_samples_to_samples(order_id: int, ordered_samples: List[OrderedSample]) -> List[Dict[str, Any]]:
+def _convert_ordered_samples_to_samples(
+    order_id: int,
+    ordered_samples: List[OrderedSample],
+    ordered_cancelled: bool = False
+) -> List[Dict[str, Any]]:
     samples = []
     for ordered_sample in ordered_samples:
         supplemental_fields = ordered_sample.supplemental_fields if ordered_sample.supplemental_fields else {}
         notes = ", ".join([f"{key}: {value}" for key, value in supplemental_fields.items()])
-        extract_volume_units = findall("[a-zA-Z]+", ordered_sample.volume)
-        volume_units = extract_volume_units[-1] if extract_volume_units else ""
         sample = {
-            "sampleID": ordered_sample.aliquot_id,
-            "specimenCode": ordered_sample.identifier,
-            "kitID": order_id if ordered_sample.identifier.startswith("ST") else "",
+            "sampleID": (ordered_sample.aliquot_id or ordered_sample.nph_sample_id),
+            "specimenCode": (ordered_sample.identifier or ordered_sample.test),
+            "kitID": order_id if (ordered_sample.identifier or ordered_sample.test).startswith("ST") else "",
             "volume": ordered_sample.volume,
-            "volumeUOM": volume_units,
-            "processingDateUTC": ordered_sample.finalized,
+            "volumeUOM": ordered_sample.volumeUnits,
+            "collectionDateUTC": _format_timestamp(ordered_sample.collected),
+            "processingDateUTC": _format_timestamp((ordered_sample.parent or ordered_sample).finalized),
+            "cancelledFlag": "Y" if ordered_cancelled else "N",
             "notes": notes,
         }
         samples.append(sample)
@@ -149,17 +180,23 @@ def _convert_orders_to_collections(
     collections = []
     for order in orders:
         samples = _convert_ordered_samples_to_samples(
-            order_id=order.id,
-            ordered_samples=_get_ordered_samples(order_id=order.id)
+            order_id=order.nph_order_id,
+            ordered_samples=_get_ordered_samples(order_id=order.id),
+            ordered_cancelled=order.status == "cancelled"
         )
         parent_study_category = _get_parent_study_category(order.category_id)
-        collections.append({
-            "visitID": parent_study_category.name if parent_study_category else "",
-            "timepointID": _get_study_category(order.category_id).name,
-            "orderID": order.nph_order_id,
-            "nyFlag": "Y" if rdr_participant_summary.state == "NY" else "N",
-            "samples": samples
-        })
+        code_obj = _get_code_obj_from_sex_id(rdr_participant_summary.stateId)
+        nyFlag = "N"
+        if code_obj is not None:
+            nyFlag = "Y" if code_obj.value.rsplit("_", 1)[1] == "NY" else "N"
+        if len(samples) > 0:
+            collections.append({
+                "visitID": parent_study_category.name if parent_study_category else "",
+                "timepointID": _get_study_category(order.category_id).name,
+                "orderID": order.nph_order_id,
+                "nyFlag": nyFlag,
+                "samples": samples
+            })
     return collections
 
 
@@ -169,7 +206,7 @@ def _get_all_ordered_samples_for_an_order(order_id: int) -> Iterable[OrderedSamp
         return session.query(OrderedSample).filter(
             and_(
                 OrderedSample.order_id == order_id,
-                OrderedSample.aliquot_id.is_not(None)
+                OrderedSample.aliquot_id.isnot(None)
             )
         ).all()
 
@@ -238,21 +275,32 @@ def main():
     )
     grouped_orders: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     for order in orders:
-        finalized_site = order.finalized_site
+        client_id = order.client_id
         nph_module_id = _get_parent_study_category(_get_parent_study_category(order.category_id).id)
         participant_id = order.participant_id
-        grouped_orders[(finalized_site, nph_module_id.name, participant_id)].append(order)
+        grouped_orders[(client_id, nph_module_id.name, participant_id)].append(order)
 
-    for (finalized_site, nph_module_id, participant_id), orders in grouped_orders.items():
+    nph_biobank_prefix = (
+        config.NPH_PROD_BIOBANK_PREFIX if config.GAE_PROJECT == "all-of-us-rdr-prod" \
+            else config.NPH_TEST_BIOBANK_PREFIX
+    )
+    for (client_id, nph_module_id, participant_id), orders in grouped_orders.items():
         rdr_participant_summary: RdrParticipantSummary = (
             _get_rdr_participant_summary_for_nph_partipant(order.participant_id)
         )
         participant_biobank_id = _get_nph_participant(participant_id).biobank_id
+
+        sex_at_birth = ""
+        if rdr_participant_summary.sexId is not None:
+            code_obj = _get_code_obj_from_sex_id(rdr_participant_summary.sexId)
+            if code_obj is not None:
+                sex_at_birth = code_obj.value.rsplit("_", 1)[1]
+
         json_object = {
-            "clientID": finalized_site,
-            "studyID":  nph_module_id,
-            "participantID": participant_biobank_id,
-            "gender": rdr_participant_summary.sexId,
+            "clientID": client_id,
+            "studyID":  f"NPH Module {nph_module_id}",
+            "participantID": f"{nph_biobank_prefix}{participant_biobank_id}",
+            "gender": sex_at_birth,
             "ai_an_flag": "Y" if rdr_participant_summary.aian else "N",
             "collections": _convert_orders_to_collections(orders, rdr_participant_summary)
         }
@@ -268,7 +316,3 @@ def main():
     sample_updates_for_orders = _get_all_sample_updates_related_to_orders(orders)
     biobank_file_export = _create_biobank_file_export_reference(bucket_name, json_filepath)
     _create_sample_export_references_for_sample_updates(biobank_file_export.id, sample_updates_for_orders)
-
-
-if __name__=="__main__":
-    main()

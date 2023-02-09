@@ -62,6 +62,7 @@ class Order(NphBase):
     __tablename__ = "order"
 
     id = Column("id", BigInteger, autoincrement=True, primary_key=True)
+    client_id = Column(String(64), nullable=True)
     nph_order_id = Column(String(64))
     created = Column(UTCDateTime)
     modified = Column(UTCDateTime)
@@ -107,6 +108,7 @@ class OrderedSample(NphBase):
     identifier = Column(String(128))
     container = Column(String(128))
     volume = Column(String(128))
+    volumeUnits = Column(String(128))
     status = Column(String(128))
     supplemental_fields = Column(JSON, nullable=True)
     parent = relation("OrderedSample", remote_side=[id])

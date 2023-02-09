@@ -609,7 +609,7 @@ class ParticipantSummaryDao(UpdatableDao):
     def _make_updated_since_filter(self, updated_since_value):
         return FieldFilter('lastModified', Operator.GREATER_THAN_OR_EQUALS, updated_since_value)
 
-    def update_from_biobank_stored_samples(self, participant_id=None, biobank_ids=None):
+    def update_from_biobank_stored_samples(self, participant_id=None, biobank_ids=None, session=None):
         """Rewrites sample-related summary data. Call this after updating BiobankStoredSamples.
     If participant_id is provided, only that participant will have their summary updated."""
         now = clock.CLOCK.now()
@@ -645,21 +645,27 @@ class ParticipantSummaryDao(UpdatableDao):
         sample_sql = replace_null_safe_equals(sample_sql)
         counts_sql = replace_null_safe_equals(counts_sql)
 
-        with self.session() as session:
-            session.execute(sample_sql, sample_params)
-            session.execute(counts_sql, counts_params)
-            session.commit()
+        if not session:
+            with self.session() as session:
+                self._run_sql_updates(sample_sql, sample_params, counts_sql, counts_params, biobank_ids, session)
+        else:
+            self._run_sql_updates(sample_sql, sample_params, counts_sql, counts_params, biobank_ids, session)
 
-            if biobank_ids:
-                summary_list = session.query(ParticipantSummary).filter(
-                    ParticipantSummary.biobankId.in_(biobank_ids)
-                ).all()
-                for summary in summary_list:
-                    self.update_enrollment_status(
-                        summary=summary,
-                        session=session
-                    )
-                    session.commit()
+    def _run_sql_updates(self, sample_sql, sample_params, counts_sql, counts_params, biobank_ids, session):
+        session.execute(sample_sql, sample_params)
+        session.execute(counts_sql, counts_params)
+        session.commit()
+
+        if biobank_ids:
+            summary_list = session.query(ParticipantSummary).filter(
+                ParticipantSummary.biobankId.in_(biobank_ids)
+            ).all()
+            for summary in summary_list:
+                self.update_enrollment_status(
+                    summary=summary,
+                    session=session
+                )
+                session.commit()
 
     def _get_num_baseline_ppi_modules(self):
         return len(config.getSettingList(config.BASELINE_PPI_QUESTIONNAIRE_FIELDS))
@@ -1215,16 +1221,16 @@ class ParticipantSummaryDao(UpdatableDao):
             del result['enrollmentStatusV3_0']
             del result['enrollmentStatusV3_1']
             for field_name in [
-                'enrollmentStatusParticipantV3_0Time'
-                'enrollmentStatusParticipantPlusEhrV3_0Time'
-                'enrollmentStatusPmbEligibleV3_0Time'
-                'enrollmentStatusCoreMinusPmV3_0Time'
-                'enrollmentStatusCoreV3_0Time'
-                'enrollmentStatusParticipantV3_1Time'
-                'enrollmentStatusParticipantPlusEhrV3_1Time'
-                'enrollmentStatusParticipantPlusBasicsV3_1Time'
-                'enrollmentStatusCoreMinusPmV3_1Time'
-                'enrollmentStatusCoreV3_1Time'
+                'enrollmentStatusParticipantV3_0Time',
+                'enrollmentStatusParticipantPlusEhrV3_0Time',
+                'enrollmentStatusPmbEligibleV3_0Time',
+                'enrollmentStatusCoreMinusPmV3_0Time',
+                'enrollmentStatusCoreV3_0Time',
+                'enrollmentStatusParticipantV3_1Time',
+                'enrollmentStatusParticipantPlusEhrV3_1Time',
+                'enrollmentStatusParticipantPlusBasicsV3_1Time',
+                'enrollmentStatusCoreMinusPmV3_1Time',
+                'enrollmentStatusCoreV3_1Time',
                 'enrollmentStatusParticipantPlusBaselineV3_1Time'
             ]:
                 if field_name in result:

@@ -22,6 +22,9 @@ BLOOD_SAMPLE = {
     }, {
         "system": "http://www.pmi-ops.org/sample-id",
         "value": "nph-sample-id-456"
+    },  {
+            "system": "https://www.pmi-ops.org/client-id",
+            "value": "7042688"
     }],
     "createdInfo": {
         "author": {
@@ -67,21 +70,24 @@ BLOOD_SAMPLE = {
         "id": "123",
         "identifier": "LHPSTP1",
         "container": "1.4mL Matrix Tube (500 uL)",
-        "volume": "450uL",
+        "volume": "450",
+        "units": "uL",
         "description": "1.4 mL matrix tubes",
         "collected": "2022-11-03T09:45:49Z"
     }, {
         "id": "456",
         "identifier": "LHPSTP1",
         "container": "1.4mL Matrix Tube (1000 uL)",
-        "volume": "970uL",
+        "volume": "970",
+        "units": "uL",
         "description": "1.4 mL matrix tubes",
         "collected": "2022-11-03T09:45:49Z"
     }, {
         "id": "789",
         "identifier": "LHPSTP1",
         "container": "1.4mL Matrix Tube (1000 uL)",
-        "volume": "970uL",
+        "volume": "970",
+        "units": "uL",
         "description": "1.4 mL matrix tubes",
         "collected": "2022-11-03T09:45:49Z"
     }, ],
@@ -143,8 +149,8 @@ class TestNPHParticipantOrderAPI(BaseTestCase):
         with database_factory.get_database().session() as session:
             query = Query(SampleUpdate)
             query.session = session
-            result = query.all()
-            for each in result:
+            sample_update_result = query.all()
+            for each in sample_update_result:
                 self.assertIsNotNone(each.ordered_sample_json)
 
     @patch('rdr_service.dao.study_nph_dao.NphOrderDao.get_order')

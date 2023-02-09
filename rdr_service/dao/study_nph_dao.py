@@ -369,6 +369,7 @@ class NphOrderDao(UpdatableDao):
             db_order.collected_site = collected_site
             db_order.finalized_author = self.order_cls.finalizedInfo.author.value
             db_order.finalized_site = finalized_site
+            db_order.client_id = fetch_identifier_value(self.order_cls, "client-id")
             db_order.notes = self.order_cls.notes.__dict__
         else:
             raise BadRequest("Participant ID does not match the corresponding Order ID.")
@@ -415,6 +416,7 @@ class NphOrderDao(UpdatableDao):
         order = Order()
         for order_model_field, resource_value in [("nph_order_id", fetch_identifier_value(self.order_cls, "order-id")),
                                                   ("order_created", self.order_cls.created),
+                                                  ("client_id", fetch_identifier_value(self.order_cls, "client-id")),
                                                   ("category_id", category_id),
                                                   ("participant_id", participant.id),
                                                   ("created_author", self.order_cls.createdInfo.author.value),
@@ -510,7 +512,8 @@ class NphOrderedSampleDao(UpdatableDao):
                              identifier=aliquot.identifier,
                              collected=aliquot.collected,
                              container=aliquot.container,
-                             volume=aliquot.volume
+                             volume=aliquot.volume,
+                             volumeUnits=aliquot.units
                              )
 
     @staticmethod
@@ -651,7 +654,7 @@ class NphOrderedSampleDao(UpdatableDao):
 
 def fetch_identifier_value(obj: Namespace, identifier: str) -> str:
     for each in obj.identifier:
-        if each.system == f"http://www.pmi-ops.org/{identifier}":
+        if identifier in each.system:
             return each.value
 
 
