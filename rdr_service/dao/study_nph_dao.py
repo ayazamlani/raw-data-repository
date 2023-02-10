@@ -1,7 +1,5 @@
 from dataclasses import dataclass
 from typing import Tuple, Dict, List, Any
-import json
-from types import SimpleNamespace as Namespace
 from protorpc import messages
 from werkzeug.exceptions import BadRequest, NotFound
 
@@ -78,6 +76,7 @@ class AliquotObject:
         self.volume = aliquot.get("volume")
         self.description = aliquot.get("description")
         self.collected = aliquot.get("collected")
+        self.volume_units = aliquot.get("units")
 
 
 @dataclass
@@ -87,6 +86,8 @@ class OrderObject:
         self.nph_order_id = [a.get("value") for a in json_object.get("identifier") if "order-id" in a.get("system")][0]
         self.nph_sample_id = [a.get("value") for a in json_object.get("identifier")
                               if "sample-id" in a.get("system")][0]
+        self.nph_client_id = [a.get("value") for a in json_object.get("identifier")
+                              if "client-id" in a.get("system")][0]
         self.created_author = json_object.get("createdInfo").get("author").get("value")
         self.created_site = json_object.get("createdInfo").get("site").get("value")
         self.collected_author = json_object.get("collectedInfo").get("author").get("value")
@@ -101,7 +102,6 @@ class OrderObject:
         self.notes = json_object.get("notes")
         self.id = None
         self.error = None
-        pass
 
     def set_id(self, value: int):
         self.id = value
@@ -109,7 +109,7 @@ class OrderObject:
     def set_error(self, error_message):
         self.error = error_message
 
-    def as_dict(self):
+    def to_dict(self):
         return self.__dict__
 
 
@@ -176,9 +176,10 @@ class NphStudyCategoryDao(UpdatableDao):
         time_point = aliased(StudyCategory)
         query = Query(time_point)
         query.session = session
-        result = query.filter(module.id == visit_type.parent_id, visit_type.id == time_point.parent_id,
-                              module.name == obj.module, visit_type.name == obj.visitType,
-                              time_point.name == obj.timepoint).first()
+        query = query.filter(module.id == visit_type.parent_id, visit_type.id == time_point.parent_id,
+                              module.name == obj.module, visit_type.name == obj.visit_type,
+                              time_point.name == obj.time_point)
+        result = query.first()
         if not result:
             return False, ""
         else:
@@ -199,24 +200,24 @@ class NphStudyCategoryDao(UpdatableDao):
                                              StudyCategory.type_label == "module").first()
         return time_point_record, visit_type_record, module_record
 
-    def insert_with_session(self, session, order: Namespace):
+    def insert_with_session(self, order: StudyCategoryObject, session):
         # Insert the study category payload values to the db table
-        module_exist, module = self.module_exist(order, session)
-        visit_exist, visit = self.visit_type_exist(order, module, session)
+        module_exist, module = self.module_exist(order.module, session)
+        visit_exist, visit = self.visit_type_exist(order.visit_type, module, session)
         if not module_exist:
             module = StudyCategory(name=order.module, type_label="module")
         if not visit_exist:
-            visit = StudyCategory(name=order.visitType, type_label="visitType")
+            visit = StudyCategory(name=order.visit_type, type_label="visitType")
             module.children.append(visit)
-        time = self.insert_time_point_record(order)
+        time = self.insert_time_point_record(order.time_point)
         visit.children.append(time)
         session.add(module)
         session.commit()
         return module, time.id
 
     @staticmethod
-    def insert_time_point_record(order: Namespace):
-        return StudyCategory(name=order.timepoint, type_label="timepoint")
+    def insert_time_point_record(time_point: str):
+        return StudyCategory(name=time_point, type_label="timepoint")
 
     @staticmethod
     def validate_model(obj):
@@ -228,23 +229,23 @@ class NphStudyCategoryDao(UpdatableDao):
             raise BadRequest("Time Point ID is missing")
 
     @staticmethod
-    def module_exist(order: Namespace, session):
+    def module_exist(module: str, session):
 
         query = Query(StudyCategory)
         query.session = session
-        result = query.filter(StudyCategory.type_label == "module", StudyCategory.name == order.module).first()
+        result = query.filter(StudyCategory.type_label == "module", StudyCategory.name == module).first()
         if result:
             return True, result
         else:
             return False, None
 
     @staticmethod
-    def visit_type_exist(order: Namespace, module: StudyCategory, session):
+    def visit_type_exist(visit_type: str, module: StudyCategory, session):
 
         query = Query(StudyCategory)
         query.session = session
         if module:
-            result = query.filter(StudyCategory.type_label == "visitType", StudyCategory.name == order.visitType,
+            result = query.filter(StudyCategory.type_label == "visitType", StudyCategory.name == visit_type,
                                   StudyCategory.parent_id == module.id).first()
             if result:
                 return True, result
@@ -300,12 +301,12 @@ class NphOrderDao(UpdatableDao):
     def get_id(self, obj: Order):
         return obj.id
 
-    def validate(self, order_id: int, nph_participant_id: str, session):
+    def validate(self, obj: OrderObject, order_id: int, nph_participant_id: str, session):
         participant_exist = self.participant_dao.check_participant_exist(nph_participant_id, session)
         order_exist, order = self.check_order_exist(order_id, session)
-        create_site_exist = self.site_dao.site_exist(session, self.order_cls.createdInfo.site.value)
-        collected_site_exist = self.site_dao.site_exist(session, self.order_cls.collectedInfo.site.value)
-        finalized_site_exist = self.site_dao.site_exist(session, self.order_cls.finalizedInfo.site.value)
+        create_site_exist = self.site_dao.site_exist(session, obj.created_site)
+        collected_site_exist = self.site_dao.site_exist(session, obj.collected_site)
+        finalized_site_exist = self.site_dao.site_exist(session, obj.finalized_site)
         if participant_exist is not True:
             raise BadRequest(f"Participant ID does not exist: {nph_participant_id}")
         if order_exist is not True:
@@ -325,14 +326,13 @@ class NphOrderDao(UpdatableDao):
             raise BadRequest("VisitType does not match the corresponding module")
         if module_record is None:
             raise BadRequest("Module does not exist")
-        payload = self.order_cls
 
-        if payload.module != module_record.name:
-            raise BadRequest(f"Module does not exist: {payload.module}")
-        if payload.visitType != visit_type_record.name:
-            raise BadRequest(f"VisitType does not match the corresponding module: {payload.visitType}")
-        if payload.timepoint != time_point_record.name:
-            raise BadRequest(f"TimePoint does not match the corresponding visitType: {payload.timepoint}")
+        if obj.study_category.module != module_record.name:
+            raise BadRequest(f"Module does not exist: {obj.study_category.module}")
+        if obj.study_category.visit_type != visit_type_record.name:
+            raise BadRequest(f"VisitType does not match the corresponding module: {obj.study_category.visit_type}")
+        if obj.study_category.time_point != time_point_record.name:
+            raise BadRequest(f"TimePoint does not match the corresponding visitType: {obj.study_category.time_point}")
 
     def patch_update(self, obj: PatchUpdate, rdr_order_id: int, nph_participant_id: str, session) -> Order:
         try:
@@ -356,21 +356,21 @@ class NphOrderDao(UpdatableDao):
         except Exception as exp:
             raise exp
 
-    def update_order(self, rdr_order_id: int, nph_participant_id: str, session) -> Order:
-        create_site = self.site_dao.get_id(session, self.order_cls.createdInfo.site.value)
-        collected_site = self.site_dao.get_id(session, self.order_cls.collectedInfo.site.value)
-        finalized_site = self.site_dao.get_id(session, self.order_cls.finalizedInfo.site.value)
+    def update_order(self, obj: OrderObject, rdr_order_id: int, nph_participant_id: str, session) -> Order:
+        create_site = self.site_dao.get_id(session, obj.created_site)
+        collected_site = self.site_dao.get_id(session, obj.collected_site)
+        finalized_site = self.site_dao.get_id(session, obj.finalized_site)
         db_order = self.get_order(rdr_order_id, session)
         if db_order.participant_id == self.participant_dao.get_id(session, nph_participant_id):
-            db_order.nph_order_id = fetch_identifier_value(self.order_cls, "order-id")
-            db_order.created_author = self.order_cls.createdInfo.author.value
+            db_order.nph_order_id = obj.nph_order_id
+            db_order.created_author = obj.created_author
             db_order.created_site = create_site
-            db_order.collected_author = self.order_cls.collectedInfo.author.value
+            db_order.collected_author = obj.collected_author
             db_order.collected_site = collected_site
-            db_order.finalized_author = self.order_cls.finalizedInfo.author.value
+            db_order.finalized_author = obj.finalized_author
             db_order.finalized_site = finalized_site
-            db_order.client_id = fetch_identifier_value(self.order_cls, "client-id")
-            db_order.notes = self.order_cls.notes.__dict__
+            db_order.client_id = obj.nph_client_id
+            db_order.notes = obj.notes
         else:
             raise BadRequest("Participant ID does not match the corresponding Order ID.")
         return db_order
@@ -395,17 +395,14 @@ class NphOrderDao(UpdatableDao):
         else:
             return False, None
 
-    def get_study_category_id(self, session, study_category: StudyCategory):
-        return self.study_category_dao.get_id(session, study_category)
+    def get_study_category_id(self, session, study_cat: StudyCategoryObject):
+        return self.study_category_dao.get_id(session, study_cat)
 
-    def set_order_cls(self, resource_data):
-        self.order_cls = json.loads(resource_data, object_hook=lambda d: Namespace(**d))
-
-    def from_client_json(self, session, nph_participant_id, category_id):
+    def from_client_json(self, session, nph_participant_id, category_id, obj: OrderObject):
         try:
-            create_site = self.site_dao.get_id(session, self.order_cls.createdInfo.site.value)
-            collected_site = self.site_dao.get_id(session, self.order_cls.collectedInfo.site.value)
-            finalized_site = self.site_dao.get_id(session, self.order_cls.finalizedInfo.site.value)
+            create_site = self.site_dao.get_id(session, obj.created_site)
+            collected_site = self.site_dao.get_id(session, obj.collected_site)
+            finalized_site = self.site_dao.get_id(session, obj.finalized_site)
             participant = self.participant_dao.get_participant(nph_participant_id, session)
         except NotFound:
             raise
@@ -414,25 +411,25 @@ class NphOrderDao(UpdatableDao):
         if not participant:
             raise NotFound(f"Participant not Found: {nph_participant_id}")
         order = Order()
-        for order_model_field, resource_value in [("nph_order_id", fetch_identifier_value(self.order_cls, "order-id")),
-                                                  ("order_created", self.order_cls.created),
-                                                  ("client_id", fetch_identifier_value(self.order_cls, "client-id")),
+        for order_model_field, resource_value in [("nph_order_id", obj.nph_order_id),
+                                                  ("order_created", obj.created),
+                                                  ("client_id", obj.nph_client_id),
                                                   ("category_id", category_id),
                                                   ("participant_id", participant.id),
-                                                  ("created_author", self.order_cls.createdInfo.author.value),
+                                                  ("created_author", obj.created_author),
                                                   ("created_site", create_site),
-                                                  ("collected_author", self.order_cls.collectedInfo.author.value),
+                                                  ("collected_author", obj.collected_author),
                                                   ("collected_site", collected_site),
-                                                  ("finalized_author", self.order_cls.finalizedInfo.author.value),
+                                                  ("finalized_author", obj.finalized_author),
                                                   ("finalized_site", finalized_site),
-                                                  ("notes", self.order_cls.notes.__dict__)]:
+                                                  ("notes", obj.notes)]:
 
             if resource_value is not None:
                 order.__setattr__(order_model_field, resource_value)
 
         return order
 
-    def _validate_model(self, obj):
+    def _validate_model(self, obj: Order):
         if obj.category_id is None:
             raise BadRequest("Category ID is missing")
         if obj.created_site is None:
@@ -442,10 +439,10 @@ class NphOrderDao(UpdatableDao):
         if obj.finalized_site is None:
             raise BadRequest("Finalized Site ID is missing")
 
-    def insert_study_category_with_session(self, order: Namespace, session):
-        return self.study_category_dao.insert_with_session(order, session)
+    def insert_study_category_with_session(self, session, order: OrderObject):
+        return self.study_category_dao.insert_with_session(order.study_category, session)
 
-    def insert_ordered_sample_dao_with_session(self, session, order: Namespace):
+    def insert_ordered_sample_dao_with_session(self, session, order: OrderObject):
         return self.order_sample_dao.insert_with_session(session, order)
 
     def insert_with_session(self, session, order: Order) -> Order:
@@ -493,14 +490,14 @@ class NphOrderedSampleDao(UpdatableDao):
         except exc.SQLAlchemyError as sql:
             raise sql
 
-    def from_client_json(self, obj: Namespace, order_id: int, nph_sample_id: str) -> OrderedSample:
+    def from_client_json(self, obj: OrderObject, order_id: int, nph_sample_id: str) -> OrderedSample:
         return OrderedSample(nph_sample_id=nph_sample_id,
                              order_id=order_id,
-                             test=obj.sample.test,
-                             description=obj.sample.description,
-                             collected=obj.sample.collected,
-                             finalized=obj.sample.finalized,
-                             supplemental_fields=self._fetch_supplemental_fields(obj)
+                             test=obj.parent_sample.test,
+                             description=obj.parent_sample.description,
+                             collected=obj.parent_sample.collected,
+                             finalized=obj.parent_sample.finalized,
+                             supplemental_fields=obj.parent_sample.supplemental_fields
                              )
 
     @staticmethod
@@ -513,7 +510,7 @@ class NphOrderedSampleDao(UpdatableDao):
                              collected=aliquot.collected,
                              container=aliquot.container,
                              volume=aliquot.volume,
-                             volumeUnits=aliquot.units
+                             volumeUnits=aliquot.volume_units
                              )
 
     @staticmethod
@@ -522,18 +519,18 @@ class NphOrderedSampleDao(UpdatableDao):
         result = {k: v for k, v in order_cls.sample.__dict__.items() if k not in keys}
         return result
 
-    def insert_with_session(self, session, order: Namespace) -> Namespace:
+    def insert_with_session(self, session, order: OrderObject) -> OrderObject:
         return self._insert_order_sample(session, order)
 
-    def _insert_order_sample(self, session, order: Namespace):
+    def _insert_order_sample(self, session, order: OrderObject):
         # Adding record(s) to nph.order_sample table
         try:
             ordered_sample_list = []
-            nph_sample_id = fetch_identifier_value(order, "sample-id")
+            nph_sample_id = order.nph_sample_id
             os = self.from_client_json(order, order.id, nph_sample_id)
             ordered_sample_list.append(os)
-            if order.__dict__.get("aliquots"):
-                for aliquot in order.aliquots:
+            if len(order.child_sample) > 0:
+                for aliquot in order.child_sample:
                     oa = self.from_aliquot_client_json(aliquot, order.id, nph_sample_id)
                     os.children.append(oa)
                     ordered_sample_list.append(oa)
@@ -554,7 +551,7 @@ class NphOrderedSampleDao(UpdatableDao):
         except BadRequest as bad_request:
             raise bad_request
 
-    def update_order_sample(self, order: Namespace, rdr_order_id: int, session):
+    def update_order_sample(self, order: OrderObject, rdr_order_id: int, session):
         try:
             ordered_sample_list = []
             db_parent_order_sample = self._get_parent_order_sample(rdr_order_id, session)
@@ -585,15 +582,15 @@ class NphOrderedSampleDao(UpdatableDao):
         except Exception as exp:
             raise exp
 
-    def _update_child_order(self, payload: Namespace, order_sample: List[OrderedSample], nph_sample_id: str,
+    def _update_child_order(self, payload: OrderObject, order_sample: List[OrderedSample], nph_sample_id: str,
                             rdr_order_id: int) -> List[OrderedSample]:
         try:
             db_child_sample_dict = {co.aliquot_id: co for co in order_sample}
             db_child_sample_keys = [co.aliquot_id for co in order_sample]
             os_list = []
-            if payload.__dict__.get("aliquots"):
-                payload_sample_keys = [po.id for po in payload.aliquots]
-                payload_sample_dict = {po.id: po for po in payload.aliquots}
+            if len(payload.child_sample) > 0:
+                payload_sample_keys = [po.id for po in payload.child_sample]
+                payload_sample_dict = {po.id: po for po in payload.child_sample}
                 os_to_cancel = set(db_child_sample_keys) - set(payload_sample_keys)
                 os_to_insert = set(payload_sample_keys) - set(db_child_sample_keys)
                 os_to_update = set(payload_sample_keys).intersection(db_child_sample_keys)
@@ -622,17 +619,19 @@ class NphOrderedSampleDao(UpdatableDao):
         except Exception as exp:
             raise exp
 
-    def _update_parent_order(self, obj: Namespace, order_sample: OrderedSample) -> OrderedSample:
-        order_sample.nph_sample_id = fetch_identifier_value(obj, "sample-id")
-        order_sample.test = obj.sample.test
-        order_sample.description = obj.sample.description
-        order_sample.collected = obj.sample.collected
-        order_sample.finalized = obj.sample.finalized
-        order_sample.supplemental_fields = self._fetch_supplemental_fields(obj)
+    @staticmethod
+    def _update_parent_order(obj: OrderObject, order_sample: OrderedSample) -> OrderedSample:
+        order_sample.nph_sample_id = obj.nph_sample_id
+        order_sample.test = obj.parent_sample.test
+        order_sample.description = obj.parent_sample.description
+        order_sample.collected = obj.parent_sample.collected
+        order_sample.finalized = obj.parent_sample.finalized
+        order_sample.supplemental_fields = obj.parent_sample.supplemental_fields
         return order_sample
 
     @staticmethod
-    def _update_restored_child_order(obj: Namespace, order_sample: OrderedSample, nph_sample_id: str) -> OrderedSample:
+    def _update_restored_child_order(obj: AliquotObject, order_sample: OrderedSample,
+                                     nph_sample_id: str) -> OrderedSample:
         order_sample.nph_sample_id = nph_sample_id
         order_sample.identifier = obj.identifier
         order_sample.container = obj.container
@@ -650,12 +649,6 @@ class NphOrderedSampleDao(UpdatableDao):
     def _validate_model(self, obj):
         if obj.order_id is None:
             raise BadRequest("Order ID is missing")
-
-
-def fetch_identifier_value(obj: Namespace, identifier: str) -> str:
-    for each in obj.identifier:
-        if identifier in each.system:
-            return each.value
 
 
 class NphActivityDao(BaseDao):

@@ -31,6 +31,7 @@ class AliquotSchema(Schema):
     volume = fields.String(required=True)
     description = fields.String(required=True)
     collected = fields.String(required=True)
+    units = fields.String(required=True)
 
 
 class NotesSchema(Schema):
@@ -63,14 +64,14 @@ class OrderSchema(Schema):
 
 class RestoredUpdateSchema(Schema):
 
-    status = fields.String(validate=validate.OneOf(["cancelled", "restored", "CANCELLED", "RESTORED"]), required=True)
+    status = fields.String(validate=validate.OneOf(["restored", "RESTORED"]), required=True)
     amendedReason = fields.String(required=True)
     restoredInfo = fields.Nested(AmendedInfoSchema, required=True)
 
 
 class CancelledUpdateSchema(Schema):
 
-    status = fields.String(validate=validate.OneOf(["cancelled", "restored", "CANCELLED", "RESTORED"]), required=True)
+    status = fields.String(validate=validate.OneOf(["cancelled", "CANCELLED"]), required=True)
     amendedReason = fields.String(required=True)
     cancelledInfo = fields.Nested(AmendedInfoSchema, required=True)
 

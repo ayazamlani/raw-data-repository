@@ -25,8 +25,8 @@ class CustomEncoder(json.JSONEncoder):
 
 def construct_response(obj):
     # Construct Response payload
-    #return json.loads(json.dumps(order, indent=4, cls=CustomEncoder))
-    return obj.to_dict()
+    return json.loads(json.dumps(obj, indent=4, cls=CustomEncoder))
+
 
 
 class NphOrderApi(UpdatableApi):
@@ -45,22 +45,23 @@ class NphOrderApi(UpdatableApi):
                 logging.error(message)
                 return {"error": message}, 400
             with database_factory.get_database().session() as session:
-                self.dao.set_order_cls(request.get_data())
-                order = self.dao.order_cls
-                self.dao.validate(rdr_order_id, nph_participant_id, session)
+                json_obj = request.get_json(force=True)
+                OrderSchema().load(json_obj)
+                order = OrderObject(json_obj)
+                self.dao.validate(order, rdr_order_id, nph_participant_id, session)
                 self.dao.order_sample_dao.update_order_sample(order, rdr_order_id, session)
-                self.dao.update_order(rdr_order_id, nph_participant_id, session)
-                order.id = rdr_order_id
-            return construct_response(order), 201
+                self.dao.update_order(order, rdr_order_id, nph_participant_id, session)
+                json_obj["id"] = rdr_order_id
+            return construct_response(json_obj), 201
         except NotFound as not_found:
             logging.error(not_found.description)
-            return construct_response(order), 404
+            return construct_response(json_obj), 404
         except BadRequest as bad_request:
             logging.error(bad_request.description)
-            return construct_response(order), 404
+            return construct_response(json_obj), 404
         except exc.SQLAlchemyError as sql:
             logging.error(sql)
-            return construct_response(order), 400
+            return construct_response(json_obj), 400
 
     @auth_required(RTI_AND_HEALTHPRO)
     def post(self, nph_participant_id: str):
@@ -70,25 +71,28 @@ class NphOrderApi(UpdatableApi):
             return {"error": message}, 400
         json_obj = request.get_json(force=True)
         try:
-            order = OrderSchema().load(json_obj)
-            order = OrderObject(order)
+            OrderSchema().load(json_obj)
+            obj = OrderObject(json_obj)
             with database_factory.get_database().session() as session:
-                exist, time_point_id = self.dao.get_study_category_id(session, order.study_category)
+                exist, time_point_id = self.dao.get_study_category_id(session, obj.study_category)
                 if not exist:
-                    logging.warning(f'Inserting new order to study_category table: module = {order.module}, '
-                                    f'visitType: {order.visitType}, timePoint: {order.timepoint}')
-                    time_point_id = self.dao.insert_study_category_with_session(session, order)[1]
-                new_order = self.dao.from_client_json(session, nph_participant_id, time_point_id)
-                new_order = self.dao.insert_with_session(session, new_order)
-                order.id = new_order.id
-                self.dao.insert_ordered_sample_dao_with_session(session, order)
-                return construct_response(order), 201
+                    logging.warning(f'Inserting new order to study_category table: '
+                                    f'module = {obj.study_category.module}, '
+                                    f'visitType: {obj.study_category.visit_type}, '
+                                    f'timePoint: {obj.study_category.time_point}')
+                    time_point_id = self.dao.insert_study_category_with_session(session, obj)[1]
+                order = self.dao.from_client_json(session, nph_participant_id, time_point_id, obj)
+                order = self.dao.insert_with_session(session, order)
+                obj.set_id(order.id)
+                self.dao.insert_ordered_sample_dao_with_session(session, obj)
+                json_obj["id"] = order.id
+                return construct_response(json_obj), 201
         except ValidationError as val_error:
             logging.error(val_error.messages)
             return val_error.messages, 400
         except NotFound as not_found:
             logging.error(not_found)
-            return json_obj, 404
+            return {"error": not_found}, 404
         except BadRequest as bad_request:
             logging.error(bad_request)
             return json_obj, 400
@@ -105,26 +109,25 @@ class NphOrderApi(UpdatableApi):
         if rdr_order_id and nph_participant_id:
             json_obj = request.get_json(force=True)
             try:
-                RestoredUpdateSchema().load(json_obj) if json_obj["status"].upper() == "RESTORED" \
-                    else CancelledUpdateSchema().load(json_obj)
+                if json_obj["status"].upper() == "RESTORED":
+                    RestoredUpdateSchema().load(json_obj)
+                else:
+                    CancelledUpdateSchema().load(json_obj)
+                patch_update = PatchUpdate(json_obj)
                 with database_factory.get_database().session() as session:
-                    patch_update = PatchUpdate(json_obj)
                     self.dao.patch_update(patch_update, rdr_order_id, nph_participant_id, session)
                     session.commit()
                     json_obj["id"] = rdr_order_id
-                    return json_obj, 200
+                    return construct_response(json_obj), 200
             except ValidationError as val_error:
                 logging.error(val_error.messages)
                 return val_error.messages, 400
             except NotFound as not_found:
                 logging.error(not_found.description)
-                patch_update.set_error(not_found.description)
-                return construct_response(patch_update), 404
+                return construct_response(json_obj), 404
             except BadRequest as bad_request:
                 logging.error(bad_request.description)
-                patch_update.set_error(bad_request.description)
-                return construct_response(patch_update), 400
+                return construct_response(json_obj), 400
             except exc.SQLAlchemyError as sql:
                 logging.error(sql)
-                patch_update.set_error(sql.__dict__['orig'])
-                return construct_response(patch_update), 400
+                return construct_response(json_obj), 400
