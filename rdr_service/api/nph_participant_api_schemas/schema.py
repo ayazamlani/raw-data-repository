@@ -337,7 +337,7 @@ class ParticipantQuery(ObjectType):
             # withdrawn_type = aliased(EnrollmentEventType)
             # et2 = aliased(EnrollmentEventType)
             query = sessions.query(
-                ParticipantSummaryModel, Site, nphSite, ParticipantMapping,
+                ParticipantSummaryModel, Site, nphSite, ParticipantMapping, DbParticipant
                 # EnrollmentEvent, EnrollmentEventType, deactivated, withdrawn
             ).join(
                 Site,
@@ -351,6 +351,9 @@ class ParticipantQuery(ObjectType):
             # ).join(
             #     et2,
             #     EnrollmentEvent.event_type_id == et2.id
+            ).join(
+                DbParticipant,
+                DbParticipant.id == ParticipantMapping.ancillary_participant_id
             ).join(
                 PairingEvent,
                 PairingEvent.participant_id == ParticipantMapping.ancillary_participant_id
