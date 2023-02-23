@@ -805,6 +805,11 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
                             # TODO: Should we have also have a 'consent_expired_id', if so what would the integer
                             #  value be (there is only a question code_id in the code table, no answer code_id)?
 
+                        # DA-3278 : "Yes" EHR consents go through PDF validation which determines module_status
+                        if module_name == 'EHRConsentPII' and module_status == BQModuleStatusEnum.SUBMITTED:
+                            module_status = self.get_pdf_validation_status(row.questionnaireResponseId,
+                                                                           row.authored, ro_session)
+
                         module_data['status'] = module_status.name
                         module_data['status_id'] = module_status.value
                         mod_ca['answer'] = consent['consent_value']
@@ -1636,13 +1641,12 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
         consent_status = _consent_answer_status_map.get(answer_code, None) if answer_code else None
         if not consent_status:
             if module == 'EHRConsentPII':
-                # PDR-979:  Match RDR by defaulting to SUBMITTED_NO_CONSENT for (sensitive) EHRConsentPII if
-                # there was not a recognized "yes" consent answer
+                # PDR-979:  Match RDR, default to SUBMITTED_NO_CONSENT for (sensitive) EHRConsentPII if there was no
+                # recognized "yes" consent answer.
                 consent_status = BQModuleStatusEnum.SUBMITTED_NO_CONSENT
             else:
-                # For other modules/cases where there wasn't any recognized consent answer found in the payload
-                # (not even PMI_SKIP, which maps to UNSET)
-                consent_status = BQModuleStatusEnum.SUBMITTED_INVALID
+                # PDR-1925: SUBMITTED_INVALID has a revised meaning for PDF validation, so use UNSET for missing answers
+                consent_status = BQModuleStatusEnum.UNSET
 
         return answer_code, consent_status
 
@@ -1806,6 +1810,47 @@ class ParticipantSummaryGenerator(generators.BaseGenerator):
         data['ubr_overall'] = ubr.ubr_overall(data)
 
         return data
+
+    @staticmethod
+    def get_pdf_validation_status(qr_id, consent_authored, ro_session=None):
+        """
+        Determines consent status based on PDF validation status. Initially only applies to EHR PDF validation
+        :param qr_id:  A questionnaire_response_id value
+        :param consent_authored: An authored date for the consent
+        :param ro_session:  A read-only session object
+        """
+        # Arbitrary cut-off for avoiding incorrectly assuming SUBMITTED_NOT_VALIDATED
+        pdf_validation_start_date = datetime.datetime(2023, 2, 15)
+        dao = None
+        if not ro_session:
+            dao = ResourceDataDao(backup=True)
+            ro_session = dao.session()
+
+        # Find consent validation result associated with this questionnaire response.  Note, many older consent
+        # validation results do not have a consent_response record because that relation/table was added later
+        sql = """
+             select cf.sync_status
+             from consent_response cr
+             join consent_file cf on cr.id = cf.consent_response_id
+             where cr.questionnaire_response_id = :qr_id
+
+        """
+        result = ro_session.execute(sql, {'qr_id': qr_id}).fetchone()
+        if result:
+            if result["sync_status"] in (int(ConsentSyncStatus.NEEDS_CORRECTING), int(ConsentSyncStatus.OBSOLETE)):
+                status = BQModuleStatusEnum.SUBMITTED_INVALID
+            else:
+                status = BQModuleStatusEnum.SUBMITTED
+        elif consent_authored < pdf_validation_start_date:
+            # Intentional no-op for older consents we couldn't match on qr_id to a validation result
+            status = BQModuleStatusEnum.SUBMITTED
+        else:
+            status = BQModuleStatusEnum.SUBMITTED_NOT_VALIDATED
+
+        if dao is not None:
+            dao.session().close()
+
+        return status
 
     @staticmethod
     def generate_primary_consent_metrics(p_id, ro_session=None):
